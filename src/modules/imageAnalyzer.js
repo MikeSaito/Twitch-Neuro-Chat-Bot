@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { ProxyAPI } from './proxyAPI.js';
 
 export class ImageAnalyzer {
@@ -8,15 +9,36 @@ export class ImageAnalyzer {
     this.brainCoordinator = config.brainCoordinator || null; // Координатор для оптимизации промптов
     
     if (this.useProxyAPI) {
-      // Используем ProxyAPI
-      this.proxyAPI = new ProxyAPI({
-        apiKey: config.proxyAPIKey,
-        baseUrl: config.proxyAPIBaseUrl,
-        provider: config.proxyAPIProvider,
-        model: config.proxyAPIVisionModel,
-      });
-      this.openai = this.proxyAPI.getOpenAIClient();
-      console.log('[ImageAnalyzer] Используется ProxyAPI для анализа изображений');
+      // Проверяем, используем ли мы Gemini модель
+      const visionModel = config.proxyAPIVisionModel || 'gemini-2.0-flash-exp';
+      const isGeminiModel = visionModel.toLowerCase().includes('gemini');
+      
+      if (isGeminiModel) {
+        // Используем Google Generative AI SDK для Gemini через ProxyAPI
+        this.genAI = new GoogleGenerativeAI(config.proxyAPIKey || '');
+        // Убираем суффикс -exp если есть (для ProxyAPI нужна модель без суффикса)
+        const modelName = visionModel.endsWith('-exp') 
+          ? visionModel.slice(0, -4) 
+          : visionModel;
+        this.model = this.genAI.getGenerativeModel(
+          { model: modelName || 'gemini-2.0-flash' },
+          {
+            baseUrl: `${config.proxyAPIBaseUrl || 'https://api.proxyapi.ru'}/google`,
+          }
+        );
+        console.log(`[ImageAnalyzer] Используется Google Generative AI SDK для Gemini через ProxyAPI`);
+        console.log(`[ImageAnalyzer] Модель: ${modelName} (из ${visionModel})`);
+      } else {
+        // Для других моделей используем ProxyAPI через OpenAI-совместимый API
+        this.proxyAPI = new ProxyAPI({
+          apiKey: config.proxyAPIKey,
+          baseUrl: config.proxyAPIBaseUrl,
+          provider: config.proxyAPIProvider,
+          model: visionModel,
+        });
+        this.openai = this.proxyAPI.getOpenAIClient();
+        console.log(`[ImageAnalyzer] Используется ProxyAPI для анализа изображений (модель: ${visionModel})`);
+      }
     } else {
       // Прямой OpenAI API
       this.openai = new OpenAI({
@@ -170,10 +192,16 @@ export class ImageAnalyzer {
         };
       }
       
-      console.log(`[ImageAnalyzer] 📊 Размер изображения: ${imageBuffer.length} байт, Base64 длина: ${base64Image.length} символов`);
+      // Проверяем размер изображения (ограничение 20 МБ для Gemini)
+      const imageSizeMB = imageBuffer.length / (1024 * 1024);
+      if (imageSizeMB > 20) {
+        console.warn(`[ImageAnalyzer] ⚠️ Изображение слишком большое: ${imageSizeMB.toFixed(2)} МБ (максимум 20 МБ)`);
+        // Можно попробовать сжать изображение, но пока просто предупреждаем
+      }
+      
+      console.log(`[ImageAnalyzer] 📊 Размер изображения: ${imageBuffer.length} байт (${imageSizeMB.toFixed(2)} МБ), Base64 длина: ${base64Image.length} символов`);
       
       // Для ProxyAPI пробуем разные модели, если первая не работает
-      // Важно: только модели с поддержкой vision (image_url)
       const visionModels = this.useProxyAPI 
         ? [
             this.config.proxyAPIVisionModel || 'gemini-2.0-flash-exp', // По умолчанию Gemini 2.0 Flash
@@ -191,78 +219,71 @@ export class ImageAnalyzer {
           
           // Проверяем, является ли модель Gemini
           const isGeminiModel = visionModel.toLowerCase().includes('gemini');
-          const isQwenModel = visionModel.toLowerCase().includes('qwen');
-          const isProxyAPI = this.useProxyAPI;
           
-          // Формируем правильный data URL для изображения
-          // Для ProxyAPI и разных моделей может потребоваться разный формат
-          let imageDataUrl = `data:image/png;base64,${base64Image}`;
+          let description;
           
-          // Логируем информацию для отладки
-          console.log(`[ImageAnalyzer] 📊 Base64 длина: ${base64Image.length}, Префикс: data:image/png;base64,`);
-          console.log(`[ImageAnalyzer] 📊 Полный data URL длина: ${imageDataUrl.length}`);
-          
-          // Формируем content в зависимости от модели и провайдера
-          let content = [
-            {
-              type: 'text',
-              text: prompt,
-            },
-          ];
-          
-          // Для Gemini через ProxyAPI используем стандартный формат OpenAI API (ProxyAPI конвертирует)
-          // Для qwen через ProxyAPI может потребоваться другой формат
-          if (isProxyAPI && isQwenModel) {
-            // Для qwen через ProxyAPI пробуем альтернативный формат
-            console.log('[ImageAnalyzer] 🔄 Используется специальный формат для qwen через ProxyAPI');
-            imageDataUrl = base64Image; // Без префикса data:image/png;base64,
-          }
-          
-          // Для Gemini через ProxyAPI используем стандартный формат OpenAI API
-          // ProxyAPI автоматически конвертирует запросы в формат Gemini
-          if (isGeminiModel) {
-            console.log('[ImageAnalyzer] 🔄 Используется формат для Gemini через ProxyAPI');
-            // Используем стандартный формат OpenAI API - ProxyAPI конвертирует в Gemini
-          }
-          
-          // Добавляем изображение
-          const imageContent = {
-            type: 'image_url',
-            image_url: {
-              url: imageDataUrl,
-              detail: 'high', // Максимальное качество для лучшего распознавания
-            },
-          };
-          
-          content.push(imageContent);
-          
-          // Логируем структуру запроса (без полного base64)
-          console.log(`[ImageAnalyzer] 📤 Отправка запроса: модель=${visionModel}, content items=${content.length}`);
-          console.log(`[ImageAnalyzer] 📤 Image URL префикс: ${imageDataUrl.substring(0, 50)}...`);
-          console.log(`[ImageAnalyzer] 📤 Image URL длина: ${imageDataUrl.length} символов`);
-          console.log(`[ImageAnalyzer] 📤 Content структура: text=${content[0]?.type}, image=${content[1]?.type}`);
-          
-          // Проверяем что content правильно сформирован
-          if (!content || content.length !== 2) {
-            throw new Error(`Неправильная структура content: ожидалось 2 элемента, получено ${content.length}`);
-          }
-          
-          if (content[1]?.type !== 'image_url' || !content[1]?.image_url?.url) {
-            throw new Error(`Неправильная структура image_url в content`);
-          }
-          
-          const response = await this.openai.chat.completions.create({
-            model: visionModel,
-            messages: [
+          if (this.useProxyAPI && isGeminiModel && this.model) {
+            // Используем Google Generative AI SDK для Gemini
+            console.log('[ImageAnalyzer] 🔄 Используется Google Generative AI SDK для Gemini через ProxyAPI');
+            
+            // Определяем MIME тип (по умолчанию PNG, но можно определить по содержимому)
+            let mimeType = 'image/png';
+            if (imageBuffer[0] === 0xFF && imageBuffer[1] === 0xD8) {
+              mimeType = 'image/jpeg';
+            } else if (imageBuffer[0] === 0x89 && imageBuffer[1] === 0x50) {
+              mimeType = 'image/png';
+            }
+            
+            // Используем base64 без префикса data:image/...
+            // Правильный формат для Google Generative AI SDK
+            const response = await this.model.generateContent({
+              contents: [{
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: mimeType,
+                      data: base64Image, // base64 без префикса
+                    },
+                  },
+                  {
+                    text: prompt,
+                  },
+                ],
+              }],
+            });
+            
+            description = response.response.text();
+          } else {
+            // Используем OpenAI-совместимый API (OpenAI или ProxyAPI для других моделей)
+            const imageDataUrl = `data:image/png;base64,${base64Image}`;
+            
+            const content = [
               {
-                role: 'user',
-                content: content,
+                type: 'text',
+                text: prompt,
               },
-            ],
-            max_tokens: 1500,
-          });
+              {
+                type: 'image_url',
+                image_url: {
+                  url: imageDataUrl,
+                  detail: 'high', // Максимальное качество для лучшего распознавания
+                },
+              },
+            ];
+            
+            const response = await this.openai.chat.completions.create({
+              model: visionModel,
+              messages: [
+                {
+                  role: 'user',
+                  content: content,
+                },
+              ],
+              max_tokens: 1500,
+            });
 
-          const description = response.choices[0].message.content;
+            description = response.choices[0].message.content;
+          }
           
           console.log(`[ImageAnalyzer] ✅ ОПИСАНИЕ ИЗОБРАЖЕНИЯ:`);
           console.log(`[ImageAnalyzer] 📝 "${description.substring(0, 200)}${description.length > 200 ? '...' : ''}"`);

@@ -1268,9 +1268,9 @@ export class VirtualBrowser {
     // Создаем VAD если еще не создан
     if (!this.vad) {
       this.vad = new VoiceActivityDetector({
-        volumeThreshold: 0.01,
-        minSpeechDuration: 0.5,
-        silenceDuration: 1.0,
+        volumeThreshold: 0.005, // Смягчено: было 0.01, стало 0.005 (лучше улавливает тихую речь)
+        minSpeechDuration: 0.3, // Смягчено: было 0.5, стало 0.3 (улавливает короткие фразы)
+        silenceDuration: 0.5, // Смягчено: было 1.0, стало 0.5 (быстрее определяет конец речи)
       });
 
       this.vad.on('speechStart', () => {
@@ -1436,34 +1436,38 @@ export class VirtualBrowser {
 
   /**
    * Запуск цикла захвата и обработки аудио
-   * Теперь использует умный захват с VAD
+   * Обычный периодический захват без VAD
    */
   async startAudioCaptureLoop(callback, intervalMs = 5000) {
     if (!this.isRunning) {
       await this.init();
     }
 
-    // Используем новый умный метод с VAD
-    return this.startSmartAudioCaptureLoop(callback);
-  }
-
-  /**
-   * Умный захват аудио с VAD - захватывает только когда человек говорит
-   */
-  async startSmartAudioCaptureLoop(callback) {
-    if (!this.isRunning) {
-      await this.init();
-    }
-
-    console.log(`[Browser] 🧠 Запуск УМНОГО захвата аудио с VAD`);
-    console.log(`[Browser] ✅ Захват только когда человек говорит`);
-    console.log(`[Browser] ✅ Файл получается только когда мысль закончена`);
-    console.log(`[Browser] 📡 Потоковая передача в нейронку (не файлами)`);
+    console.log(`[Browser] 🎤 Запуск обычного захвата аудио (каждые ${intervalMs / 1000} секунд)`);
+    console.log(`[Browser] ⚠️ VAD отключен - захват по таймеру`);
     
-    // Начинаем сразу без ожидания
-    console.log(`[Browser] 📡 Получаем URL стрима...`);
-    await this.ensureStreamUrl();
-    console.log(`[Browser] ✅ Начинаем умный захват речи...`);
-    await this.captureSpeechWithVAD(callback);
+    // Обычный периодический захват без VAD
+    const captureInterval = setInterval(async () => {
+      if (!this.isRunning) {
+        clearInterval(captureInterval);
+        return;
+      }
+
+      try {
+        console.log(`[Browser] 🎤 Попытка захвата аудио (${intervalMs / 1000} секунд)...`);
+        const audioBuffer = await this.captureAudio(intervalMs / 1000);
+        
+        if (audioBuffer && audioBuffer.length > 0) {
+          console.log(`[Browser] ✅ Аудио захвачено: ${audioBuffer.length} байт`);
+          await callback(audioBuffer);
+        } else {
+          console.log(`[Browser] ⚠️ Аудио не захвачено`);
+        }
+      } catch (error) {
+        console.error(`[Browser] Ошибка захвата аудио:`, error.message);
+      }
+    }, intervalMs);
+
+    return captureInterval;
   }
 }

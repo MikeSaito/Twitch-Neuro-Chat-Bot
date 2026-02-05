@@ -9,12 +9,12 @@ export class VoiceActivityDetector extends EventEmitter {
   constructor(config = {}) {
     super();
     this.config = {
-      // Порог громкости для определения речи (0-1)
-      volumeThreshold: config.volumeThreshold || 0.01,
-      // Минимальная длительность речи в секундах
-      minSpeechDuration: config.minSpeechDuration || 0.5,
-      // Время тишины после речи для определения конца (секунды)
-      silenceDuration: config.silenceDuration || 1.0,
+      // Порог громкости для определения речи (0-1) - СМЯГЧЕНО для лучшего улавливания
+      volumeThreshold: config.volumeThreshold || 0.005, // Было 0.01, стало 0.005 (в 2 раза ниже)
+      // Минимальная длительность речи в секундах - СМЯГЧЕНО
+      minSpeechDuration: config.minSpeechDuration || 0.3, // Было 0.5, стало 0.3 (улавливает короткие фразы)
+      // Время тишины после речи для определения конца (секунды) - СМЯГЧЕНО
+      silenceDuration: config.silenceDuration || 0.5, // Было 1.0, стало 0.5 (быстрее определяет конец)
       // Частота дискретизации
       sampleRate: config.sampleRate || 16000,
       // Размер буфера для анализа (секунды)
@@ -170,7 +170,12 @@ export class VoiceActivityDetector extends EventEmitter {
    */
   processVolumeSample(volumeLinear) {
     const now = Date.now();
-    const hasSpeech = volumeLinear > this.config.volumeThreshold;
+    // Смягченная проверка: используем немного более низкий порог для начала речи
+    // и более высокий для продолжения (чтобы не терять речь при небольших паузах)
+    const speechStartThreshold = this.config.volumeThreshold * 0.8; // Еще ниже для начала
+    const speechContinueThreshold = this.config.volumeThreshold * 0.5; // Очень низкий для продолжения
+    const hasSpeech = volumeLinear > speechStartThreshold;
+    const hasSpeechContinue = volumeLinear > speechContinueThreshold;
 
     if (hasSpeech) {
       if (!this.isSpeechActive) {
@@ -178,9 +183,13 @@ export class VoiceActivityDetector extends EventEmitter {
         this.isSpeechActive = true;
         this.speechStartTime = now;
         this.audioBuffer = [];
-        console.log('[VAD] 🎤 Начало речи обнаружено');
+        console.log(`[VAD] 🎤 Начало речи обнаружено (громкость: ${(volumeLinear * 100).toFixed(2)}%)`);
         this.emit('speechStart', { timestamp: now });
       }
+      this.lastSpeechTime = now;
+    } else if (this.isSpeechActive && hasSpeechContinue) {
+      // Продолжаем считать что речь активна даже при небольшом снижении громкости
+      // Это помогает не терять речь при коротких паузах или снижении громкости
       this.lastSpeechTime = now;
     } else {
       if (this.isSpeechActive) {
@@ -196,6 +205,8 @@ export class VoiceActivityDetector extends EventEmitter {
               duration: speechDuration,
               audioBuffer: Buffer.concat(this.audioBuffer),
             });
+          } else {
+            console.log(`[VAD] ⚠️ Речь слишком короткая (${speechDuration.toFixed(2)}с), пропускаем`);
           }
           this.isSpeechActive = false;
           this.speechStartTime = null;

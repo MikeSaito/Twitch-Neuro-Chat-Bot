@@ -80,6 +80,15 @@ export class LocalLLM {
         usage: response.data.usage || {},
       };
     } catch (error) {
+      if (error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET') {
+        console.error(`[LocalLLM] ❌ Ollama не запущен или недоступен на ${this.apiUrl}`);
+        console.error(`[LocalLLM] 💡 Решение:`);
+        console.error(`[LocalLLM]    1. Убедитесь, что Ollama установлен и запущен`);
+        console.error(`[LocalLLM]    2. Проверьте, что Ollama слушает на порту 11434`);
+        console.error(`[LocalLLM]    3. Запустите Ollama: ollama serve`);
+        console.error(`[LocalLLM]    4. Или используйте ProxyAPI, установив USE_PROXYAPI=true в .env`);
+        throw new Error(`Ollama недоступен: убедитесь, что Ollama запущен на ${this.apiUrl}`);
+      }
       if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
         console.warn(`[LocalLLM] Таймаут запроса к Ollama (${this.timeout}ms). Модель работает медленно.`);
         console.warn(`[LocalLLM] Рекомендация: используйте более легкую модель или ProxyAPI для ускорения.`);
@@ -99,22 +108,35 @@ export class LocalLLM {
     
     messages.push({ role: 'user', content: prompt });
 
-    const response = await axios.post(
-      `${this.apiUrl}/v1/chat/completions`,
-      {
-        model: this.model,
-        messages: messages,
-        temperature: options.temperature || 0.8,
-        max_tokens: options.max_tokens || 500,
-      },
-      { timeout: this.timeout }
-    );
+    try {
+      const response = await axios.post(
+        `${this.apiUrl}/v1/chat/completions`,
+        {
+          model: this.model,
+          messages: messages,
+          temperature: options.temperature || 0.8,
+          max_tokens: options.max_tokens || 500,
+        },
+        { timeout: this.timeout }
+      );
 
-    return {
-      text: response.data.choices[0]?.message?.content || '',
-      model: response.data.model || this.model,
-      usage: response.data.usage || {},
-    };
+      return {
+        text: response.data.choices[0]?.message?.content || '',
+        model: response.data.model || this.model,
+        usage: response.data.usage || {},
+      };
+    } catch (error) {
+      if (error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET') {
+        console.error(`[LocalLLM] ❌ LM Studio не запущен или недоступен на ${this.apiUrl}`);
+        console.error(`[LocalLLM] 💡 Решение: убедитесь, что LM Studio запущен и API включен`);
+        throw new Error(`LM Studio недоступен: убедитесь, что LM Studio запущен на ${this.apiUrl}`);
+      }
+      if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        console.warn(`[LocalLLM] Таймаут запроса к LM Studio (${this.timeout}ms).`);
+        throw new Error(`Таймаут генерации: модель не успела обработать запрос за ${this.timeout}ms`);
+      }
+      throw error;
+    }
   }
 
   async analyzeImage(imageBuffer, prompt) {

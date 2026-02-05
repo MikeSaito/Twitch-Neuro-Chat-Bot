@@ -173,9 +173,11 @@ ${messagesText}
         });
       }
 
-      const result = await this.localLLM.generate(
-        prompt,
-        `Ты эксперт по анализу Twitch чата. Твоя задача - найти ТОЛЬКО действительно интересные сообщения для ответа.
+      let result;
+      try {
+        result = await this.localLLM.generate(
+          prompt,
+          `Ты эксперт по анализу Twitch чата. Твоя задача - найти ТОЛЬКО действительно интересные сообщения для ответа.
 
 БУДЬ СТРОГИМ:
 - Игнорируй простые реакции ("красава", "вау")
@@ -184,12 +186,22 @@ ${messagesText}
 - Учитывай контекст стрима
 
 Верни ТОЛЬКО номера интересных сообщений через запятую или "null".`,
-        {
-          temperature: 0.2, // Снижена для более точного анализа
-          max_tokens: 100,
-          top_p: 0.9,
+          {
+            temperature: 0.2, // Снижена для более точного анализа
+            max_tokens: 100,
+            top_p: 0.9,
+          }
+        );
+      } catch (error) {
+        // Если Ollama недоступен, возвращаем пустой результат
+        if (error.message?.includes('Ollama недоступен') || error.code === 'ECONNREFUSED') {
+          console.warn(`[ChatReader] ⚠️ Ollama недоступен, пропускаю анализ чата`);
+          return [];
         }
-      );
+        // Для других ошибок логируем и возвращаем пустой результат
+        console.error(`[ChatReader] Ошибка ИИ анализа:`, error.message || error);
+        return [];
+      }
 
       // Извлекаем текст из результата (localLLM.generate возвращает объект с полем text)
       const resultText = typeof result === 'string' ? result : (result?.text || String(result || 'null'));
