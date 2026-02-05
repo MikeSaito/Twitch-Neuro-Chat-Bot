@@ -1,0 +1,56 @@
+# Зависимости
+node_modules/
+package-lock.json
+
+# Переменные окружения
+.env
+.env.local
+.env.*.local
+
+# Временные файлы
+temp_audio/
+*.mp3
+*.wav
+*.part
+*.tmp
+
+# Скриншоты (опционально - можно включить в репозиторий)
+screenshots/
+*.png
+
+# Логи
+*.log
+npm-debug.log*
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Кэш и временные файлы Windows
+AppData/
+*.parc
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+
+# Ресурсы (промпты и память могут содержать чувствительные данные)
+resources/prompts/
+resources/brain_memory.json
+
+# Данные
+data/voices.json

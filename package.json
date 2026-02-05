@@ -1,0 +1,29 @@
+{
+  "name": "twitch-neuro-chat-bot",
+  "version": "1.0.0",
+  "description": "Умный бот для Twitch чата с нейросетевым анализом стрима",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test:audio": "node test_audio_capture.js",
+    "test:speech": "node test_speech_recognition.js",
+    "cleanup": "node cleanup_temp_files.js"
+  },
+  "keywords": ["twitch", "bot", "ai", "neural-network"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "tmi.js": "^1.8.5",
+    "playwright": "^1.40.0",
+    "openai": "^4.20.0",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
+    "sharp": "^0.32.6",
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  }
+}
