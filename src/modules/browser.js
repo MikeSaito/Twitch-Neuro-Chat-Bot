@@ -59,7 +59,7 @@ export class VirtualBrowser {
       }
       
       if (cleanedCount > 0) {
-        console.log(`[Browser] 🧹 Очищено ${cleanedCount} старых скриншотов (старше ${maxAgeMinutes} минут)`);
+        // Очищены старые скриншоты
       }
     } catch (error) {
       // Игнорируем ошибки очистки
@@ -95,7 +95,7 @@ export class VirtualBrowser {
       }
       
       if (cleanedCount > 0) {
-        console.log(`[Browser] 🧹 Очищено ${cleanedCount} старых временных файлов`);
+        // Очищены старые временные файлы
       }
     } catch (error) {
       // Игнорируем ошибки очистки
@@ -146,7 +146,7 @@ export class VirtualBrowser {
       
       // Открываем Twitch стрим
       const twitchUrl = `https://www.twitch.tv/${this.config.channel}`;
-      console.log(`[Browser] Загрузка страницы: ${twitchUrl}`);
+      // Загрузка страницы
       
       try {
         // Пробуем загрузить с более мягким условием ожидания
@@ -160,16 +160,14 @@ export class VirtualBrowser {
         // Пробуем дождаться появления видео элемента (если есть)
         try {
           await this.page.waitForSelector('video', { timeout: 10000 }).catch(() => {
-            console.log('[Browser] Видео элемент не найден, продолжаем...');
+            // Видео элемент не найден
           });
           
-          // Устанавливаем максимальное качество видео и разворачиваем на весь экран
-          console.log('[Browser] 🎥 Установка максимального качества видео...');
-          console.log('[Browser] 🖥️ Разворачивание трансляции на весь экран...');
-          // Устанавливаем качество и разворачиваем с задержкой, чтобы плеер успел загрузиться
+          // Устанавливаем максимальное качество видео (БЕЗ разворачивания на весь экран)
+          // Оставляем обычный режим, чтобы в скриншотах было видно интерфейс Twitch (чат, данные стрима)
           setTimeout(async () => {
             await this.setMaxVideoQuality();
-            await this.expandVideoToFullscreen();
+            // ОТКЛЮЧЕНО: await this.expandVideoToFullscreen(); // Не разворачиваем на весь экран, чтобы видеть интерфейс
           }, 5000); // 5 секунд после появления видео элемента
         } catch (e) {
           // Игнорируем, если видео нет
@@ -179,7 +177,7 @@ export class VirtualBrowser {
         // Продолжаем работу даже если страница загрузилась не полностью
       }
       
-      console.log(`[Browser] Подключен к стриму: ${twitchUrl}`);
+      // Подключен к стриму
       this.isRunning = true;
       
       // Получаем URL стрима один раз при инициализации (после загрузки)
@@ -349,7 +347,7 @@ export class VirtualBrowser {
           });
           
           if (qualitySelected.success) {
-            console.log(`[Browser] ✅ Качество видео установлено через UI: ${qualitySelected.quality}`);
+            // Качество видео установлено
             return;
           }
         } catch (uiError) {
@@ -358,10 +356,9 @@ export class VirtualBrowser {
       }
       
       if (qualitySet.success && qualitySet.method === 'API') {
-        console.log(`[Browser] ✅ Качество видео установлено через API: ${qualitySet.quality}`);
-      } else {
-        console.log(`[Browser] ⚠️ Не удалось установить качество автоматически: ${qualitySet.reason}`);
-        console.log(`[Browser] 💡 Используется качество из localStorage или по умолчанию`);
+        // Качество видео установлено
+        } else {
+        // Качество видео не установлено автоматически
       }
       
     } catch (error) {
@@ -451,10 +448,9 @@ export class VirtualBrowser {
       });
       
       if (result.success) {
-        console.log(`[Browser] ✅ ${result.message} (метод: ${result.method})`);
-      } else {
-        console.log(`[Browser] ⚠️ Не удалось развернуть видео: ${result.reason}`);
-        console.log(`[Browser] 💡 Плеер может использовать стандартный размер`);
+        // Видео развернуто
+        } else {
+        // Не удалось развернуть видео
       }
       
     } catch (error) {
@@ -466,6 +462,17 @@ export class VirtualBrowser {
   async takeScreenshot() {
     if (!this.page || !this.isRunning) {
       throw new Error('Браузер не инициализирован');
+    }
+
+    // Проверяем, что страница не закрыта
+    if (this.page.isClosed()) {
+      console.warn('[Browser] ⚠️ Страница закрыта, пытаемся переподключиться...');
+      this.isRunning = false;
+      try {
+        await this.init();
+      } catch (error) {
+        throw new Error(`Браузер закрыт и не удалось переподключиться: ${error.message}`);
+      }
     }
 
     try {
@@ -495,6 +502,21 @@ export class VirtualBrowser {
         timestamp,
       };
     } catch (error) {
+      // Проверяем, не закрыт ли браузер
+      if (error.message && (error.message.includes('Target page, context or browser has been closed') || 
+          error.message.includes('Target closed') ||
+          error.message.includes('Browser closed'))) {
+        console.warn('[Browser] ⚠️ Браузер закрыт во время скриншота, пытаемся переподключиться...');
+        this.isRunning = false;
+        try {
+          await this.init();
+          // Пробуем еще раз после переподключения
+          return await this.takeScreenshot();
+        } catch (reconnectError) {
+          console.error('[Browser] ❌ Не удалось переподключиться:', reconnectError.message);
+          throw new Error(`Браузер закрыт: ${error.message}`);
+        }
+      }
       console.error('[Browser] Ошибка при создании скриншота:', error);
       throw error;
     }
@@ -502,6 +524,13 @@ export class VirtualBrowser {
 
   async startScreenshotLoop(callback) {
     if (!this.isRunning) {
+      await this.init();
+    }
+
+    // Убеждаемся, что браузер полностью инициализирован
+    if (!this.page || this.page.isClosed()) {
+      console.warn('[Browser] ⚠️ Страница не инициализирована или закрыта, переподключаемся...');
+      this.isRunning = false;
       await this.init();
     }
 
@@ -515,8 +544,14 @@ export class VirtualBrowser {
     const takeScreenshotAsync = async () => {
       if (!this.isRunning || isProcessing) {
         if (isProcessing) {
-          console.log('[Browser] ⏳ Пропуск скриншота: предыдущий еще обрабатывается');
+          // Пропуск скриншота
         }
+        return;
+      }
+
+      // Дополнительная проверка перед скриншотом
+      if (!this.page || this.page.isClosed()) {
+        console.warn('[Browser] ⚠️ Страница закрыта в цикле, пропускаем скриншот');
         return;
       }
 
@@ -532,7 +567,24 @@ export class VirtualBrowser {
           await this.cleanupOldScreenshots();
         }
       } catch (error) {
-        console.error('[Browser] Ошибка в callback скриншота:', error);
+        // Проверяем, не закрыт ли браузер
+        if (error.message && (error.message.includes('Target page, context or browser has been closed') || 
+            error.message.includes('Target closed') ||
+            error.message.includes('Browser closed') ||
+            error.message.includes('Браузер закрыт'))) {
+          console.warn('[Browser] ⚠️ Браузер закрыт, пытаемся переподключиться в следующем цикле...');
+          this.isRunning = false;
+          // Попробуем переподключиться в следующем цикле
+          setTimeout(async () => {
+            try {
+              await this.init();
+            } catch (reconnectError) {
+              console.error('[Browser] ❌ Не удалось переподключиться:', reconnectError.message);
+            }
+          }, 2000);
+        } else {
+          console.error('[Browser] Ошибка в callback скриншота:', error);
+        }
       } finally {
         isProcessing = false;
       }
@@ -550,8 +602,7 @@ export class VirtualBrowser {
       takeScreenshotAsync();
     }, this.config.screenshotInterval);
 
-    console.log(`[Browser] Цикл скриншотов запущен (интервал: ${this.config.screenshotInterval}ms)`);
-    console.log(`[Browser] ⚡ Режим: последовательный (ждет завершения обработки)`);
+    // Цикл скриншотов запущен
     
     return interval;
   }
@@ -570,41 +621,36 @@ export class VirtualBrowser {
    * 
    * ВАЖНО: Захват аудио из браузера сложен. Рекомендуется использовать yt-dlp или streamlink
    */
-  async captureAudio(durationSeconds = 5) {
+  async captureAudio(durationSeconds = 3) {
     if (!this.page || !this.isRunning) {
-      console.log('[Browser] 🎤 Браузер не готов для захвата аудио');
       return null;
     }
 
-    console.log(`[Browser] 🎤 Попытка захвата аудио (${durationSeconds} секунд)...`);
-    
-    // Пробуем сначала через yt-dlp (более надежный способ)
-    const ytdlpResult = await this.captureAudioWithYtDlp(durationSeconds);
-    if (ytdlpResult && ytdlpResult.audio) {
-      return ytdlpResult.audio;
-    }
-    
-    // Если yt-dlp найден, но захват не удался - не пробуем браузерный метод
-    if (ytdlpResult && ytdlpResult.ytdlpFound) {
-      // yt-dlp найден, но захват не удался (возможно, стрим недоступен или другая ошибка)
-      return null;
-    }
-
-    // Если yt-dlp не найден, пробуем через браузер (экспериментально)
-    // Но это не должно происходить, так как yt-dlp уже найден при инициализации
     try {
-      console.log('[Browser] 🎤 Пробую захват через браузер (экспериментально)...');
-      
-      // Пробуем получить аудио через CDP
-      const client = await this.page.context().newCDPSession(this.page);
-      await client.send('Page.enable');
-      
-      // Пока что возвращаем null - захват через браузер требует дополнительной настройки
-      console.log('[Browser] ⚠️ Захват через браузер пока не реализован');
-      
-      return null;
+      // Проверяем наличие ffmpeg
+      const hasFfmpeg = await this.checkFfmpeg();
+      if (!hasFfmpeg) {
+        return null;
+      }
+
+      // Получаем URL стрима
+      const streamUrl = await this.ensureStreamUrl();
+      if (!streamUrl) {
+        return null;
+      }
+
+      // Создаем временный файл
+      const tempDir = path.join(os.tmpdir(), 'twitch_bot_audio');
+      await fs.mkdir(tempDir, { recursive: true });
+      const timestamp = Date.now();
+      const outputPath = path.join(tempDir, `audio_${timestamp}.mp3`);
+
+      // Захватываем через ffmpeg
+      const result = await this.captureAudioWithFfmpeg(streamUrl, outputPath, durationSeconds);
+      return result?.audio || null;
     } catch (error) {
-      console.error('[Browser] Ошибка захвата аудио через браузер:', error.message);
+      console.error('[Browser] Ошибка захвата аудио:', error.message);
+      this.streamUrl = null; // Сбрасываем URL при ошибке
       return null;
     }
   }
@@ -786,7 +832,7 @@ export class VirtualBrowser {
       }
       
       if (cleanedCount > 0) {
-        console.log(`[Browser] 🧹 Очищено ${cleanedCount} старых временных файлов`);
+        // Очищены старые временные файлы
       }
     } catch (error) {
       // Игнорируем ошибки очистки
@@ -813,13 +859,13 @@ export class VirtualBrowser {
     }
     
     // Получаем новый URL
-    console.log('[Browser] 📡 Получение URL стрима...');
+    // Получение URL стрима
     const streamUrl = await this.getStreamUrl(this.ytdlpCommand, this.config.channel);
     
     if (streamUrl) {
       this.streamUrl = streamUrl;
       this.streamUrlTimestamp = Date.now();
-      console.log(`[Browser] ✅ URL стрима сохранен для непрерывного захвата`);
+      // URL стрима сохранен
       return streamUrl;
     }
     
@@ -894,7 +940,7 @@ export class VirtualBrowser {
           '-f', 'bestaudio/best', // Сначала аудио-только, если нет - лучшее качество
         ];
         
-        console.log(`[Browser] 🔍 Команда получения URL: ${ytdlpCommand.cmd} ${ytdlpArgs.join(' ')}`);
+        // Получение URL через yt-dlp
         ytdlp = spawn(ytdlpCommand.cmd, ytdlpArgs);
       } catch (error) {
         console.error('[Browser] Ошибка запуска yt-dlp:', error.message);
@@ -915,10 +961,10 @@ export class VirtualBrowser {
           // URL стрима в stdout (может быть несколько строк, берем первую)
           const url = stdoutOutput.trim().split('\n')[0].trim();
           if (url && url.startsWith('http')) {
-            console.log(`[Browser] ✅ URL получен: ${url.substring(0, 80)}...`);
+            // URL получен
             resolve(url);
           } else {
-            console.log(`[Browser] ⚠️ Неверный формат URL: ${url}`);
+            // Неверный формат URL
             resolve(null);
           }
         } else {
@@ -976,7 +1022,7 @@ export class VirtualBrowser {
           '--verbose',
         ];
         
-        console.log(`[Browser] 📡 Захват с текущего момента стрима (непрерывный режим)`);
+        // Захват аудио
         
         console.log(`[Browser] 🎵 Запуск yt-dlp для прямого захвата аудио...`);
         ytdlp = spawn(ytdlpCommand.cmd, ytdlpArgs);
@@ -998,7 +1044,7 @@ export class VirtualBrowser {
           const lines = text.split('\n').filter(l => l.trim());
           lines.forEach(line => {
             if (line.length < 200) {
-              console.log(`[yt-dlp] ${line.trim()}`);
+              // Логи yt-dlp отключены
             }
           });
         }
@@ -1030,8 +1076,8 @@ export class VirtualBrowser {
                 const stats = await fs.stat(outputPath).catch(() => null);
                 if (stats && stats.size > 1000) {
                   const audioBuffer = await fs.readFile(outputPath);
-                  console.log(`[Browser] ✅ Аудио захвачено: ${audioBuffer.length} байт`);
-                  console.log(`[Browser] 💾 Файл сохранен для проверки: ${outputPath}`);
+                  // Аудио захвачено
+                  // Файл сохранен
                   hasResolved = true;
                   resolve({ audio: audioBuffer, ytdlpFound: true, ffmpegFound: true });
                 } else {
@@ -1057,8 +1103,8 @@ export class VirtualBrowser {
             const stats = await fs.stat(outputPath).catch(() => null);
             if (stats && stats.size > 1000) {
               const audioBuffer = await fs.readFile(outputPath);
-              console.log(`[Browser] ✅ Аудио захвачено: ${audioBuffer.length} байт`);
-              console.log(`[Browser] 💾 Файл сохранен для проверки: ${outputPath}`);
+              // Аудио захвачено
+              // Файл сохранен
               hasResolved = true;
               resolve({ audio: audioBuffer, ytdlpFound: true, ffmpegFound: true });
             } else {
@@ -1108,17 +1154,17 @@ export class VirtualBrowser {
           '-vn', // Без видео (дополнительная защита)
           '-acodec', 'libmp3lame', // Кодек MP3
           '-ab', '128k', // Битрейт аудио
-          '-ar', '48000', // Улучшенная частота дискретизации (48kHz для лучшего качества)
-          '-ac', '2', // Стерео (Whisper конвертирует в моно сам)
-          '-ab', '192k', // Битрейт аудио (выше = лучше качество)
+          '-ar', '16000', // 16kHz достаточно для Whisper (быстрее обработка)
+          '-ac', '1', // Моно (Whisper работает с моно, быстрее)
+          '-ab', '64k', // Меньший битрейт для ускорения (достаточно для речи)
           '-f', 'mp3', // Формат вывода
           '-y', // Перезаписать файл
           outputPath
         ];
         
-        console.log(`[Browser] 📡 Захват с текущего момента стрима (непрерывный режим)`);
+        // Захват аудио
         
-        console.log(`[Browser] 🎵 Запуск ffmpeg: ffmpeg ${ffmpegArgs.join(' ')}`);
+        // Запуск ffmpeg
         ffmpeg = spawn('ffmpeg', ffmpegArgs);
       } catch (error) {
         console.error('[Browser] Ошибка запуска ffmpeg:', error.message);
@@ -1147,9 +1193,7 @@ export class VirtualBrowser {
               line.includes('no audio') ||
               line.includes('Stream map') ||
               line.includes('size=')) {
-            if (line.length < 250) {
-              console.log(`[ffmpeg] ${line.trim()}`);
-            }
+            // Логи ffmpeg отключены
           }
         });
       });
@@ -1196,7 +1240,7 @@ export class VirtualBrowser {
             try {
               const audioBuffer = await fs.readFile(outputPath);
               // НЕ удаляем файл - сохраняем для проверки
-              console.log(`[Browser] ✅ Аудио захвачено: ${audioBuffer.length} байт`);
+              // Аудио захвачено
               console.log(`[Browser] 💾 Файл сохранен: ${outputPath}`);
               safeResolve({ audio: audioBuffer, ytdlpFound: true, ffmpegFound: true });
             } catch (error) {
@@ -1212,7 +1256,7 @@ export class VirtualBrowser {
       // Обработчик завершения процесса
       ffmpeg.on('close', async (code) => {
         clearInterval(checkInterval);
-        console.log(`[Browser] 🔚 Процесс ffmpeg завершен с кодом: ${code}`);
+        // Процесс ffmpeg завершен
         
         if (!hasResolved) {
           try {
@@ -1220,8 +1264,8 @@ export class VirtualBrowser {
             if (stats && stats.size > 1000) {
               const audioBuffer = await fs.readFile(outputPath);
               // НЕ удаляем файл - сохраняем для проверки звука
-              console.log(`[Browser] ✅ Аудио захвачено: ${audioBuffer.length} байт`);
-              console.log(`[Browser] 💾 Файл сохранен для проверки: ${outputPath}`);
+              // Аудио захвачено
+              // Файл сохранен
               safeResolve({ audio: audioBuffer, ytdlpFound: true, ffmpegFound: true });
             } else {
               console.log(`[Browser] ❌ Файл не создан или слишком маленький`);
@@ -1438,13 +1482,12 @@ export class VirtualBrowser {
    * Запуск цикла захвата и обработки аудио
    * Обычный периодический захват без VAD
    */
-  async startAudioCaptureLoop(callback, intervalMs = 5000) {
+  async startAudioCaptureLoop(callback, intervalMs = 3000) {
     if (!this.isRunning) {
       await this.init();
     }
 
-    console.log(`[Browser] 🎤 Запуск обычного захвата аудио (каждые ${intervalMs / 1000} секунд)`);
-    console.log(`[Browser] ⚠️ VAD отключен - захват по таймеру`);
+    // Захват аудио запущен
     
     // Обычный периодический захват без VAD
     const captureInterval = setInterval(async () => {
@@ -1454,14 +1497,14 @@ export class VirtualBrowser {
       }
 
       try {
-        console.log(`[Browser] 🎤 Попытка захвата аудио (${intervalMs / 1000} секунд)...`);
+        // Захват аудио
         const audioBuffer = await this.captureAudio(intervalMs / 1000);
         
         if (audioBuffer && audioBuffer.length > 0) {
-          console.log(`[Browser] ✅ Аудио захвачено: ${audioBuffer.length} байт`);
+          // Аудио захвачено
           await callback(audioBuffer);
         } else {
-          console.log(`[Browser] ⚠️ Аудио не захвачено`);
+          // Аудио не захвачено
         }
       } catch (error) {
         console.error(`[Browser] Ошибка захвата аудио:`, error.message);

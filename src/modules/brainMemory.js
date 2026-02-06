@@ -42,10 +42,8 @@ export class BrainMemory {
       try {
         const data = await fs.readFile(this.memoryFile, 'utf-8');
         this.memory = JSON.parse(data);
-        console.log(`[BrainMemory] 💾 Память загружена: ${this.memory.entries.length} записей`);
       } catch (error) {
         // Файл не существует - создаем новую память
-        console.log('[BrainMemory] 💾 Создана новая память');
         await this.save();
       }
       
@@ -123,7 +121,6 @@ export class BrainMemory {
     }
 
     await this.save();
-    console.log(`[BrainMemory] 💾 Записано в память: [${category}] ${content.substring(0, 50)}...`);
     
     return entry.id;
   }
@@ -227,7 +224,6 @@ export class BrainMemory {
     if (index !== -1) {
       this.memory.entries.splice(index, 1);
       await this.save();
-      console.log(`[BrainMemory] 🗑️ Запись удалена: ${id}`);
       return true;
     }
     return false;
@@ -239,7 +235,6 @@ export class BrainMemory {
   async clear() {
     this.memory.entries = [];
     await this.save();
-    console.log('[BrainMemory] 🗑️ Память очищена');
   }
 
   /**

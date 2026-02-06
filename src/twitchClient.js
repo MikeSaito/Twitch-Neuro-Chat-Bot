@@ -71,10 +71,7 @@ export class TwitchClient {
         });
       }
 
-      // Можно добавить специальные команды для управления ботом
-      if (message.startsWith('!bot')) {
-        await this.handleBotCommand(channel, tags, message);
-      }
+      // Команды управления ботом отключены в чате - используйте терминал
     });
 
     this.client.on('disconnected', (reason) => {
@@ -85,89 +82,68 @@ export class TwitchClient {
   }
 
   async sendMessage(message) {
+    // Валидация сообщения
+    if (!message || typeof message !== 'string') {
+      console.warn('[Twitch] ⚠️ Попытка отправить пустое или невалидное сообщение');
+      return false;
+    }
+
+    // Очистка сообщения от лишних пробелов и переносов строк
+    const cleanedMessage = message.trim().replace(/\n+/g, ' ').substring(0, 500);
+    
+    if (cleanedMessage.length < 1) {
+      console.warn('[Twitch] ⚠️ Сообщение слишком короткое после очистки');
+      return false;
+    }
+
     // Режим только консоли - выводим в консоль вместо отправки в чат
     if (config.debug.consoleOnly) {
-      console.log(`\n💬 [БОТ ХОЧЕТ ОТПРАВИТЬ]: ${message}\n`);
+      console.log(`\n💬 [БОТ ХОЧЕТ ОТПРАВИТЬ]: ${cleanedMessage}\n`);
       return true;
     }
 
-    if (!this.client || this.client.readyState() !== 'OPEN') {
-      console.warn('[Twitch] Клиент не подключен');
+    // Проверка подключения к Twitch
+    if (!this.client) {
+      console.warn('[Twitch] ⚠️ Клиент не инициализирован');
+      return false;
+    }
+
+    const readyState = this.client.readyState();
+    if (readyState !== 'OPEN') {
+      console.warn(`[Twitch] ⚠️ Клиент не подключен (состояние: ${readyState})`);
+      return false;
+    }
+
+    // Проверка канала
+    if (!config.twitch.channel) {
+      console.error('[Twitch] ❌ Канал не указан в конфигурации');
       return false;
     }
 
     try {
-      await this.client.say(config.twitch.channel, message);
-      console.log(`[Twitch] Отправлено: ${message}`);
+      // Отправка сообщения в чат
+      await this.client.say(config.twitch.channel, cleanedMessage);
+      console.log(`💬 "${cleanedMessage}"`);
       return true;
     } catch (error) {
-      console.error('[Twitch] Ошибка отправки сообщения:', error);
-      return false;
+      // Обработка различных типов ошибок
+      if (error.message?.includes('rate limit') || error.message?.includes('ratelimit')) {
+        console.warn('[Twitch] ⚠️ Превышен лимит отправки сообщений, ждем...');
+        // Можно добавить задержку и повторную попытку
+        return false;
+      } else if (error.message?.includes('timeout')) {
+        console.warn('[Twitch] ⚠️ Таймаут при отправке сообщения');
+        return false;
+      } else if (error.message?.includes('banned') || error.message?.includes('ban')) {
+        console.error('[Twitch] ❌ Бот забанен в чате');
+        return false;
+      } else {
+        console.error('[Twitch] ❌ Ошибка отправки сообщения:', error.message || error);
+        return false;
+      }
     }
   }
 
-  async handleBotCommand(channel, tags, message) {
-    const parts = message.split(' ');
-    const command = parts[1];
-
-    switch (command) {
-      case 'silence':
-        this.coordinator.setSilenceMode(true);
-        await this.sendMessage('Режим молчания включен');
-        break;
-      case 'unsilence':
-        this.coordinator.setSilenceMode(false);
-        await this.sendMessage('Режим молчания выключен');
-        break;
-      case 'stats':
-        const stats = this.coordinator.getStats();
-        await this.sendMessage(
-          `Статистика: сообщений отправлено ${stats.totalMessages}, пропущено ${stats.skippedMessages}`
-        );
-        break;
-      case 'mode':
-        // Переключение режима работы мозга
-        if (this.coordinator.modules && this.coordinator.modules.brainCoordinator) {
-          const currentMode = this.coordinator.modules.brainCoordinator.mode;
-          const newMode = currentMode === 'training' ? 'normal' : 'training';
-          this.coordinator.modules.brainCoordinator.setMode(newMode);
-          await this.sendMessage(`Режим работы мозга: ${newMode === 'training' ? 'ОБУЧЕНИЕ' : 'ОСНОВНОЙ'}`);
-        }
-        break;
-      case 'training':
-        // Включить режим обучения
-        if (this.coordinator.modules && this.coordinator.modules.brainCoordinator) {
-          this.coordinator.modules.brainCoordinator.setMode('training');
-          await this.sendMessage('Режим обучения включен');
-        }
-        break;
-      case 'normal':
-        // Включить основной режим
-        if (this.coordinator.modules && this.coordinator.modules.brainCoordinator) {
-          this.coordinator.modules.brainCoordinator.setMode('normal');
-          await this.sendMessage('Основной режим включен');
-        }
-        break;
-      case 'memory':
-        // Показать статистику памяти
-        if (this.coordinator.modules && this.coordinator.modules.brainCoordinator && this.coordinator.modules.brainCoordinator.memory) {
-          const stats = this.coordinator.modules.brainCoordinator.memory.getStats();
-          await this.sendMessage(
-            `Память: ${stats.totalEntries} записей, средняя важность: ${stats.averageImportance}`
-          );
-        }
-        break;
-      case 'forget':
-        // Очистить память
-        if (this.coordinator.modules && this.coordinator.modules.brainCoordinator && this.coordinator.modules.brainCoordinator.memory) {
-          await this.coordinator.modules.brainCoordinator.memory.clear();
-          await this.sendMessage('Память очищена');
-        }
-        break;
-      default:
-        break;
-    }
-  }
 
   async disconnect() {
     if (this.client) {

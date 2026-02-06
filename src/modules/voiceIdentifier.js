@@ -119,14 +119,19 @@ export class VoiceIdentifier {
     // 2. Проверка на известные голоса
     const knownVoice = await this.checkKnownVoices(text, speechData);
     if (knownVoice.confidence > 0.7) {
-      return {
+      const result = {
         speaker: knownVoice.id,
         confidence: knownVoice.confidence,
         type: knownVoice.type,
-        isStreamer: knownVoice.id === 'streamer',
+        isStreamer: knownVoice.id === 'streamer' || knownVoice.type === 'streamer', // Проверяем и id и type
         shouldIgnore: knownVoice.type === 'guest' && !this.shouldProcessGuest(knownVoice),
         name: knownVoice.name,
       };
+      
+      // Логируем результат идентификации
+      console.log(`[VoiceIdentifier] 🎤 Известный голос: ${result.isStreamer ? 'СТРИМЕР' : 'ГОСТЬ'} (${result.name}), уверенность: ${result.confidence?.toFixed(2) || '?'}`);
+      
+      return result;
     }
 
     // 3. Использование GPT для анализа и определения говорящего
@@ -139,25 +144,32 @@ export class VoiceIdentifier {
         await this.learnNewVoice(gptAnalysis, text);
       }
       
-      return {
-        speaker: gptAnalysis.speakerId || 'unknown',
+      const result = {
+        speaker: gptAnalysis.speakerId || 'streamer', // По умолчанию стример
         confidence: gptAnalysis.confidence,
-        type: gptAnalysis.type,
-        isStreamer: gptAnalysis.isStreamer,
+        type: gptAnalysis.type || 'streamer',
+        isStreamer: gptAnalysis.isStreamer !== undefined ? gptAnalysis.isStreamer : true, // По умолчанию стример
         shouldIgnore: gptAnalysis.shouldIgnore,
-        name: gptAnalysis.name,
+        name: gptAnalysis.name || this.streamerName,
         isNewVoice: gptAnalysis.isNewVoice,
       };
+      
+      // Логируем результат идентификации
+      console.log(`[VoiceIdentifier] 🎤 Идентификация: ${result.isStreamer ? 'СТРИМЕР' : 'ГОСТЬ'} (${result.name}), уверенность: ${result.confidence?.toFixed(2) || '?'}, текст: "${text.substring(0, 50)}..."`);
+      
+      return result;
     }
 
-    // 4. По умолчанию считаем неизвестным
+    // 4. По умолчанию считаем стримером (если не определено иначе)
+    // ВАЖНО: По умолчанию речь считается стримером, чтобы не пропускать важные сообщения
     return {
-      speaker: 'unknown',
-      confidence: 0.3,
-      type: 'unknown',
-      isStreamer: false,
-      shouldIgnore: true,
-      reason: 'Не удалось идентифицировать говорящего',
+      speaker: 'streamer',
+      confidence: 0.5,
+      type: 'streamer',
+      isStreamer: true, // ПО УМОЛЧАНИЮ - СТРИМЕР
+      shouldIgnore: false, // НЕ игнорируем, обрабатываем речь
+      name: this.streamerName,
+      reason: 'Не удалось идентифицировать - считаем стримером по умолчанию',
     };
   }
 

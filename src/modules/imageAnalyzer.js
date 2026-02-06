@@ -1,446 +1,472 @@
-import OpenAI from 'openai';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { ProxyAPI } from './proxyAPI.js';
+import axios from 'axios';
 
 export class ImageAnalyzer {
-  constructor(config) {
-    this.config = config;
+  constructor(config = {}) {
+    this.apiKey = config.apiKey || '';
     this.useProxyAPI = config.useProxyAPI || false;
-    this.brainCoordinator = config.brainCoordinator || null; // Координатор для оптимизации промптов
+    this.proxyAPIKey = config.proxyAPIKey || '';
+    this.proxyAPIBaseUrl = config.proxyAPIBaseUrl || 'https://api.proxyapi.ru';
+    this.proxyAPIProvider = config.proxyAPIProvider || 'google';
+    this.proxyAPIVisionModel = config.proxyAPIVisionModel || 'gemini-2.5-flash-lite';
     
-    if (this.useProxyAPI) {
-      // Проверяем, используем ли мы Gemini модель
-      const visionModel = config.proxyAPIVisionModel || 'gemini-2.0-flash-exp';
-      const isGeminiModel = visionModel.toLowerCase().includes('gemini');
-      
-      if (isGeminiModel) {
-        // Используем Google Generative AI SDK для Gemini через ProxyAPI
-        this.genAI = new GoogleGenerativeAI(config.proxyAPIKey || '');
-        // Убираем суффикс -exp если есть (для ProxyAPI нужна модель без суффикса)
-        const modelName = visionModel.endsWith('-exp') 
-          ? visionModel.slice(0, -4) 
-          : visionModel;
-        this.model = this.genAI.getGenerativeModel(
-          { model: modelName || 'gemini-2.0-flash' },
-          {
-            baseUrl: `${config.proxyAPIBaseUrl || 'https://api.proxyapi.ru'}/google`,
-          }
-        );
-        console.log(`[ImageAnalyzer] Используется Google Generative AI SDK для Gemini через ProxyAPI`);
-        console.log(`[ImageAnalyzer] Модель: ${modelName} (из ${visionModel})`);
-      } else {
-        // Для других моделей используем ProxyAPI через OpenAI-совместимый API
-        this.proxyAPI = new ProxyAPI({
-          apiKey: config.proxyAPIKey,
-          baseUrl: config.proxyAPIBaseUrl,
-          provider: config.proxyAPIProvider,
-          model: visionModel,
-        });
-        this.openai = this.proxyAPI.getOpenAIClient();
-        console.log(`[ImageAnalyzer] Используется ProxyAPI для анализа изображений (модель: ${visionModel})`);
+    this.brainCoordinator = null; // Связь с мозгом для оптимизации промптов
+    
+    // Кэш для артефактов распознавания речи (Set для быстрого поиска)
+    this.speechArtifacts = new Set([
+      'максимум', 'максима', 'максим',
+      'звук', 'звуки', 'шум', 'шумов',
+      'тишина', 'молчание', 'пауза',
+      'неразборчиво', 'непонятно',
+    ]);
+  }
+  
+  /**
+   * Фильтрация артефактов распознавания речи
+   */
+  filterSpeechArtifacts(text) {
+    if (!text || text.length < 2) return false;
+    
+    const lowerText = text.toLowerCase();
+    
+    // Проверяем точное совпадение или начало с артефакта
+    for (const artifact of this.speechArtifacts) {
+      if (lowerText === artifact || lowerText.startsWith(artifact + ' ')) {
+        return false;
       }
-    } else {
-      // Прямой OpenAI API
-      this.openai = new OpenAI({
-        apiKey: config.apiKey,
-      });
-      console.log('[ImageAnalyzer] Используется OpenAI API для анализа изображений');
     }
+    
+    // Если текст слишком короткий и содержит артефакт
+    if (text.length < 5) {
+      for (const artifact of this.speechArtifacts) {
+        if (lowerText.includes(artifact)) {
+          return false;
+        }
+      }
+    }
+    
+    return true;
   }
 
   async init() {
-    // Инициализация не требуется для API
-  }
-
-  /**
-   * Валидация результата анализа изображения (для API не требуется - всегда качественные ответы)
-   * Оставлено для совместимости, но всегда возвращает высокую уверенность
-   */
-  validateImageAnalysis(text) {
-    // Для ProxyAPI/OpenAI валидация не требуется - они всегда возвращают качественные ответы
-    if (!text || text.trim().length < 10) {
-      return {
-        description: 'Анализ изображения не удался - слишком короткий ответ',
-        confidence: 0.1,
-        warnings: ['Короткий ответ'],
-      };
+    if (this.useProxyAPI) {
+      // Используем прямой HTTP запрос к ProxyAPI
+      console.log(`[ImageAnalyzer] Используется ProxyAPI для Gemini (прямой HTTP запрос)`);
+      console.log(`[ImageAnalyzer] Модель: ${this.proxyAPIVisionModel}`);
+    } else {
+      console.log(`[ImageAnalyzer] Используется OpenAI Vision API`);
     }
-    
-    // Для API всегда высокая уверенность
-    return {
-      description: text,
-      confidence: 0.95,
-      warnings: [],
-    };
   }
 
   async analyzeScreenshot(imageBuffer) {
+    if (!imageBuffer || imageBuffer.length === 0) {
+      return {
+        description: '',
+        confidence: 0,
+        timestamp: Date.now(),
+      };
+    }
+
     try {
-      // Проверяем что imageBuffer действительно Buffer
-      if (!Buffer.isBuffer(imageBuffer)) {
-        console.warn('[ImageAnalyzer] ⚠️ imageBuffer не является Buffer, конвертируем...');
-        imageBuffer = Buffer.from(imageBuffer);
-      }
+      let description = '';
+      let confidence = 0.8;
+
+      // Получаем контекст для промпта (речь, чат и т.д.)
+      // Если есть brainCoordinator, он может предоставить дополнительный контекст
+      const promptContext = {
+        time: Date.now(),
+        recentSpeakers: [],
+        chatHistory: [],
+        realtimeSpeechText: null,
+        recentSpeechFragments: [],
+      };
       
-      // Проверяем что buffer не пустой
-      if (!imageBuffer || imageBuffer.length === 0) {
-        console.error('[ImageAnalyzer] ❌ imageBuffer пустой');
-        return {
-          description: null,
-          confidence: 0,
-          error: 'Изображение пустое',
-          timestamp: Date.now(),
-        };
-      }
-      
-      console.log(`[ImageAnalyzer] 📊 Размер изображения для анализа: ${imageBuffer.length} байт`);
-      
-      // Промпт может быть оптимизирован через BrainCoordinator
-      let prompt = `Ты эксперт по анализу Twitch стримов. Твоя задача - ТОЧНО и ПРАВДИВО описать что РЕАЛЬНО видно на скриншоте.
-
-КРИТИЧЕСКИ ВАЖНО:
-- Опиши ТОЛЬКО то, что РЕАЛЬНО видно на изображении
-- НЕ выдумывай и НЕ додумывай детали, которых нет
-- Если что-то не видно четко - скажи "не видно" или "неясно"
-- Если не уверен - скажи "возможно" или "похоже на"
-- НЕ придумывай названия игр, если не видишь их четко
-- НЕ выдумывай числа и значения, если их не видно
-
-ВНИМАТЕЛЬНО проанализируй изображение и опиши в следующем формате:
-
-0. ИНФОРМАЦИЯ О СТРИМЕ (ВАЖНО!):
-   - Название стрима (stream title) - если видно в интерфейсе Twitch (обычно вверху страницы)
-   - Категория игры (game category) - если видно название игры/категории в интерфейсе Twitch
-   - Имя стримера - если видно в интерфейсе
-   - Количество зрителей - если видно число viewers
-   - Вся видимая информация из интерфейса Twitch (текст, кнопки, метаданные)
-
-1. ИГРА/КОНТЕНТ:
-   - Какая игра или контент показывается (ТОЛЬКО если видно название или узнаваемый интерфейс)
-   - Конкретные действия на экране (что РЕАЛЬНО происходит, не додумывай)
-   - Важные события (ТОЛЬКО если они явно видны)
-   - Состояние игры (здоровье, ресурсы - ТОЛЬКО если видны числа или индикаторы)
-
-2. ИНТЕРФЕЙС И ТЕКСТ:
-   - Весь видимый текст на экране (прочитай ТОЧНО, не выдумывай)
-   - Числовые значения (ТОЛЬКО если они реально видны)
-   - Названия предметов, способностей (ТОЛЬКО если виден текст)
-   - Уведомления (ТОЛЬКО если они есть на экране)
-   - Текст из чата Twitch (ТОЛЬКО если чат виден)
-   - ВСЯ информация из интерфейса Twitch (название стрима, категория, метаданные)
-
-3. ВИЗУАЛЬНЫЕ ДЕТАЛИ:
-   - Что РЕАЛЬНО происходит на экране визуально
-   - Цвета, эффекты, анимации (описывай ТОЧНО что видишь)
-   - Состояние персонажа/объектов (ТОЛЬКО визуально видимое)
-   - Окружение и локация (описывай ТОЛЬКО то, что видно)
-
-4. ЭМОЦИОНАЛЬНЫЙ КОНТЕКСТ:
-   - Напряжённость момента (на основе визуальных признаков)
-   - Вероятная реакция зрителей (на основе видимых событий)
-   - Интересные моменты для комментариев (ТОЛЬКО если есть что-то заметное)
-
-5. КОНТЕКСТ ДЛЯ ЧАТА:
-   - О чём зрители могут говорить (на основе РЕАЛЬНО видимых событий)
-   - Что может вызвать реакцию (ТОЛЬКО видимые события)
-   - Уместные комментарии (на основе фактов, не выдумок)
-
-ПРАВИЛА ТОЧНОСТИ:
-- ОБЯЗАТЕЛЬНО ищи и читай название стрима и категорию игры в интерфейсе Twitch (обычно вверху страницы)
-- Если видишь название стрима в интерфейсе - укажи его ТОЧНО
-- Если видишь категорию игры в интерфейсе - укажи её ТОЧНО
-- Если видишь игру - назови её. Если не видишь - скажи "игра не определена" или "неясно какая игра"
-- Если видишь числа - укажи их ТОЧНО. Если не видишь - скажи "числа не видны"
-- Если видишь текст - прочитай его ТОЧНО. Если не видишь - скажи "текст не виден"
-- НЕ используй фразы типа "вероятно", "скорее всего" для фактов - только для предположений
-- Если экран загрузки или меню - скажи это прямо
-- Если реклама - скажи "идет реклама"
-- ВАЖНО: Интерфейс Twitch содержит много полезной информации - читай ВСЁ что видно!
-
-ВАЖНО:
-- Будь максимально конкретным и ТОЧНЫМ
-- Указывай ТОЛЬКО реально видимые значения и названия
-- Пиши на русском языке
-- Если что-то не видно или неясно - укажи это ЧЕСТНО
-- Структурируй ответ по разделам выше
-- НЕ выдумывай детали, которых нет на изображении`;
-      
-      // Мозг НЕ может трогать основной промпт, только дописывать подробности
-      // Оптимизируем промпт через BrainCoordinator если доступен
+      // Если есть brainCoordinator, получаем дополнительный контекст
       if (this.brainCoordinator) {
-        prompt = await this.brainCoordinator.optimizeImagePrompt(prompt, {
-          time: Date.now(),
-        });
-      }
-
-      // Используем API (OpenAI или ProxyAPI)
-      // Проверяем что imageBuffer действительно Buffer
-      if (!Buffer.isBuffer(imageBuffer)) {
-        console.warn('[ImageAnalyzer] ⚠️ imageBuffer не является Buffer, конвертируем...');
-        imageBuffer = Buffer.from(imageBuffer);
+        // Получаем накопительный текст речи
+        if (this.brainCoordinator.getCurrentSpeechText) {
+          promptContext.realtimeSpeechText = this.brainCoordinator.getCurrentSpeechText(30); // Последние 30 секунд
+        }
+        if (this.brainCoordinator.getRecentSpeechFragments) {
+          promptContext.recentSpeechFragments = this.brainCoordinator.getRecentSpeechFragments(5);
+        }
       }
       
-      const base64Image = imageBuffer.toString('base64');
-      
-      // Проверяем что base64 не пустой
-      if (!base64Image || base64Image.length < 100) {
-        console.error('[ImageAnalyzer] ❌ Base64 изображение пустое или слишком короткое');
-        return {
-          description: 'Анализ изображения не удался - изображение пустое',
-          confidence: 0,
-          timestamp: Date.now(),
-        };
-      }
-      
-      // Проверяем размер изображения (ограничение 20 МБ для Gemini)
-      const imageSizeMB = imageBuffer.length / (1024 * 1024);
-      if (imageSizeMB > 20) {
-        console.warn(`[ImageAnalyzer] ⚠️ Изображение слишком большое: ${imageSizeMB.toFixed(2)} МБ (максимум 20 МБ)`);
-        // Можно попробовать сжать изображение, но пока просто предупреждаем
-      }
-      
-      console.log(`[ImageAnalyzer] 📊 Размер изображения: ${imageBuffer.length} байт (${imageSizeMB.toFixed(2)} МБ), Base64 длина: ${base64Image.length} символов`);
-      
-      // Для ProxyAPI пробуем разные модели, если первая не работает
-      const visionModels = this.useProxyAPI 
-        ? [
-            this.config.proxyAPIVisionModel || 'gemini-2.0-flash-exp', // По умолчанию Gemini 2.0 Flash
-            'gemini-2.0-flash-exp', // Fallback на Gemini 2.0 Flash
-            'gpt-4o', // Fallback на GPT-4o
-            'gpt-4o-2024-11-20', // Fallback на конкретную версию gpt-4o
-          ]
-        : ['gpt-4o']; // Для прямого OpenAI используем gpt-4o
-
-      let lastError = null;
-      
-      for (const visionModel of visionModels) {
+      if (this.useProxyAPI) {
+        // Анализ через ProxyAPI (прямой HTTP запрос)
+        const base64Image = imageBuffer.toString('base64');
+        const prompt = await this.getImageAnalysisPrompt(promptContext);
+        
         try {
-          console.log(`[ImageAnalyzer] 🖼️ Попытка анализа через ${this.useProxyAPI ? 'ProxyAPI' : 'OpenAI'} (модель: ${visionModel})`);
-          
-          // Проверяем, является ли модель Gemini
-          const isGeminiModel = visionModel.toLowerCase().includes('gemini');
-          
-          let description;
-          
-          if (this.useProxyAPI && isGeminiModel && this.model) {
-            // Используем Google Generative AI SDK для Gemini
-            console.log('[ImageAnalyzer] 🔄 Используется Google Generative AI SDK для Gemini через ProxyAPI');
-            
-            // Определяем MIME тип (по умолчанию PNG, но можно определить по содержимому)
-            let mimeType = 'image/png';
-            if (imageBuffer[0] === 0xFF && imageBuffer[1] === 0xD8) {
-              mimeType = 'image/jpeg';
-            } else if (imageBuffer[0] === 0x89 && imageBuffer[1] === 0x50) {
-              mimeType = 'image/png';
-            }
-            
-            // Используем base64 без префикса data:image/...
-            // Правильный формат для Google Generative AI SDK
-            const response = await this.model.generateContent({
+          // Используем прямой HTTP запрос к ProxyAPI для Gemini
+          const response = await axios.post(
+            `${this.proxyAPIBaseUrl}/google/v1beta/models/${this.proxyAPIVisionModel}:generateContent`,
+            {
               contents: [{
                 parts: [
                   {
                     inlineData: {
-                      mimeType: mimeType,
-                      data: base64Image, // base64 без префикса
+                      mimeType: 'image/jpeg',
+                      data: base64Image,
                     },
                   },
-                  {
-                    text: prompt,
-                  },
+                  { text: prompt },
                 ],
               }],
-            });
-            
-            description = response.response.text();
-          } else {
-            // Используем OpenAI-совместимый API (OpenAI или ProxyAPI для других моделей)
-            const imageDataUrl = `data:image/png;base64,${base64Image}`;
-            
-            const content = [
-              {
-                type: 'text',
-                text: prompt,
+            },
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.proxyAPIKey}`,
               },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: imageDataUrl,
-                  detail: 'high', // Максимальное качество для лучшего распознавания
-                },
-              },
-            ];
-            
-            const response = await this.openai.chat.completions.create({
-              model: visionModel,
-              messages: [
-                {
-                  role: 'user',
-                  content: content,
-                },
-              ],
-              max_tokens: 1500,
-            });
-
-            description = response.choices[0].message.content;
-          }
-          
-          console.log(`[ImageAnalyzer] ✅ ОПИСАНИЕ ИЗОБРАЖЕНИЯ:`);
-          console.log(`[ImageAnalyzer] 📝 "${description.substring(0, 200)}${description.length > 200 ? '...' : ''}"`);
-          console.log(`[ImageAnalyzer] 📊 Уверенность: 100%`);
-          
-          return {
-            description,
-            confidence: 1.0,
-            timestamp: Date.now(),
-          };
-        } catch (error) {
-          lastError = error;
-          const errorStatus = error.status || error.response?.status || error.code;
-          const errorMessage = error.message || error.response?.data?.message || 'неизвестная ошибка';
-          
-          // Специальная обработка для ошибок ProxyAPI
-          if (this.useProxyAPI) {
-            if (errorStatus === 404) {
-              console.warn(`[ImageAnalyzer] ⚠️ Модель ${visionModel} не найдена или недоступна через ProxyAPI`);
-              console.warn(`[ImageAnalyzer] 💡 Возможные причины:`);
-              console.warn(`[ImageAnalyzer]    - Неверный или отсутствующий API ключ ProxyAPI`);
-              console.warn(`[ImageAnalyzer]    - Модель ${visionModel} недоступна через провайдер ${this.config.proxyAPIProvider || 'google'}`);
-              console.warn(`[ImageAnalyzer]    - Неправильное имя модели`);
-              console.warn(`[ImageAnalyzer]    - Проверьте PROXYAPI_KEY в .env файле`);
-            } else if (errorStatus === 402) {
-              console.warn(`[ImageAnalyzer] ⚠️ Ошибка доступа к ProxyAPI (402): ${errorMessage}`);
-              console.warn(`[ImageAnalyzer] 💡 Возможная причина:`);
-              console.warn(`[ImageAnalyzer]    - Недостаточно средств на ProxyAPI аккаунте`);
-              console.warn(`[ImageAnalyzer]    - Пополните баланс на https://proxyapi.ru`);
-            } else if (errorStatus === 403) {
-              console.warn(`[ImageAnalyzer] ⚠️ Ошибка доступа к ProxyAPI (403): ${errorMessage}`);
-              console.warn(`[ImageAnalyzer] 💡 Возможные причины:`);
-              console.warn(`[ImageAnalyzer]    - Неверный API ключ`);
-              console.warn(`[ImageAnalyzer]    - Превышен лимит запросов`);
-              console.warn(`[ImageAnalyzer]    - Нет доступа к модели`);
-            } else {
-              console.warn(`[ImageAnalyzer] ⚠️ Ошибка с моделью ${visionModel} (${errorStatus}): ${errorMessage}`);
+              timeout: 60000, // 60 секунд для анализа изображений
             }
+          );
+
+          description = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          if (!description && response.data?.text) {
+            description = response.data.text;
+          }
+          confidence = 1.0;
+        } catch (error) {
+          if (error.response?.status === 404) {
+            console.error(`[ImageAnalyzer] 🔑 ВОЗМОЖНАЯ ПРИЧИНА: Неверный или отсутствующий API ключ ProxyAPI`);
+            console.error(`[ImageAnalyzer]    Проверьте PROXYAPI_KEY в .env файле`);
+            throw error;
+          } else if (error.response?.status === 402) {
+            console.error(`[ImageAnalyzer] 💰 Недостаточно средств на балансе ProxyAPI`);
+            throw error;
+          } else if (error.response?.status === 403) {
+            console.error(`[ImageAnalyzer] 🚫 Доступ запрещен. Проверьте API ключ ProxyAPI`);
+            throw error;
           } else {
-            console.warn(`[ImageAnalyzer] ⚠️ Ошибка с моделью ${visionModel}: ${errorMessage}`);
-          }
-          
-          // Если это не последняя модель, пробуем следующую
-          if (visionModels.indexOf(visionModel) < visionModels.length - 1) {
-            console.log(`[ImageAnalyzer] 🔄 Пробую следующую модель...`);
-            continue;
+            throw error;
           }
         }
+      } else {
+        throw new Error('OpenAI Vision API не реализован');
       }
-      
-      // Если все модели не сработали, выбрасываем последнюю ошибку
-      const lastErrorStatus = lastError?.status || lastError?.response?.status || lastError?.code;
-      const lastErrorMessage = lastError?.message || lastError?.response?.data?.message || 'неизвестная ошибка';
-      
-      console.error(`[ImageAnalyzer] ❌ Все модели не сработали. Последняя ошибка (${lastErrorStatus}): ${lastErrorMessage}`);
-      
-      // Специальное сообщение для ProxyAPI
-      if (this.useProxyAPI) {
-        if (lastErrorStatus === 404) {
-          console.error(`[ImageAnalyzer] 🔑 ВНИМАНИЕ: Проблема с ProxyAPI (404)!`);
-          console.error(`[ImageAnalyzer]    - Проверьте PROXYAPI_KEY в .env файле (возможно ключ удален или неверный)`);
-          console.error(`[ImageAnalyzer]    - Убедитесь, что модель ${this.config.proxyAPIVisionModel || 'gemini-2.0-flash-exp'} доступна`);
-          console.error(`[ImageAnalyzer]    - Проверьте правильность PROXYAPI_PROVIDER (для Gemini используйте 'google')`);
-        } else if (lastErrorStatus === 402) {
-          console.error(`[ImageAnalyzer] 💰 ВНИМАНИЕ: Недостаточно средств на ProxyAPI!`);
-          console.error(`[ImageAnalyzer]    - Пополните баланс на https://proxyapi.ru`);
-        } else if (lastErrorStatus === 403) {
-          console.error(`[ImageAnalyzer] 🔒 ВНИМАНИЕ: Проблема с доступом к ProxyAPI (403)!`);
-          console.error(`[ImageAnalyzer]    - Проверьте правильность PROXYAPI_KEY`);
-          console.error(`[ImageAnalyzer]    - Возможно превышен лимит запросов`);
-        }
-      }
-      
-      throw lastError || new Error('Не удалось проанализировать изображение');
-    } catch (error) {
-      const errorMessage = error.message || error.status || error.response?.data?.message || 'неизвестная ошибка';
-      const errorCode = error.code || error.status || error.response?.status || 'unknown';
-      console.error(`[ImageAnalyzer] ❌ Ошибка анализа: ${errorMessage} (код: ${errorCode})`);
-      
-      // Если это ошибка 400 от ProxyAPI, даем подсказку
-      if (error.status === 400 && this.useProxyAPI) {
-        console.error('[ImageAnalyzer] 💡 Подсказка: Попробуйте изменить PROXYAPI_VISION_MODEL в .env на:');
-        console.error('[ImageAnalyzer]    - gemini-2.0-flash-exp (для Google провайдера)');
-        console.error('[ImageAnalyzer]    - gpt-4o (для OpenAI провайдера)');
-        console.error('[ImageAnalyzer]    - или другую поддерживаемую ProxyAPI модель');
-      }
-      
-      // Специальные сообщения для разных ошибок ProxyAPI
-      if (this.useProxyAPI) {
-        if (error.status === 404) {
-          console.error('[ImageAnalyzer] 🔑 ВОЗМОЖНАЯ ПРИЧИНА: Неверный или отсутствующий API ключ ProxyAPI');
-          console.error('[ImageAnalyzer]    Проверьте PROXYAPI_KEY в .env файле');
-        } else if (error.status === 402) {
-          console.error('[ImageAnalyzer] 💰 ВОЗМОЖНАЯ ПРИЧИНА: Недостаточно средств на ProxyAPI аккаунте');
-          console.error('[ImageAnalyzer]    Пополните баланс на https://proxyapi.ru');
-        } else if (error.status === 403) {
-          console.error('[ImageAnalyzer] 🔒 ВОЗМОЖНАЯ ПРИЧИНА: Проблема с доступом (неверный ключ или превышен лимит)');
-          console.error('[ImageAnalyzer]    Проверьте PROXYAPI_KEY и лимиты на https://proxyapi.ru');
-        }
-      }
-      
+
       return {
-        description: null,
-        confidence: 0,
-        error: errorMessage,
+        description: description.trim(),
+        confidence: confidence,
         timestamp: Date.now(),
+      };
+    } catch (error) {
+      console.error(`[ImageAnalyzer] Ошибка анализа изображения:`, error.message);
+      return {
+        description: '',
+        confidence: 0,
+        timestamp: Date.now(),
+        error: error.message,
       };
     }
   }
 
-  async extractTextFromImage(imageBuffer) {
+  async getImageAnalysisPrompt(context = {}) {
+    // Базовый промпт для анализа изображения
+    // Мозг может его оптимизировать через brainCoordinator
+    let prompt = `Проанализируй скриншот Twitch стрима и опиши что происходит. 
+
+ВАЖНО - Опиши:
+0. ИНФОРМАЦИЯ О СТРИМЕ (ВАЖНО!):
+   - Название стрима (stream title)
+   - Категория игры (game category)
+   - Имя стримера
+   - Количество зрителей (если видно)
+   - Вся видимая информация на экране
+
+1. Что происходит в игре/на стриме (главное действие)
+2. Эмоции стримера/игрока (если видно лицо)
+3. Важные элементы интерфейса игры
+4. Любые интересные детали
+
+Опиши кратко, но информативно на русском языке.`;
+
+    // Если есть brainCoordinator, он может оптимизировать промпт и добавить вопросы
+    if (this.brainCoordinator) {
+      try {
+        prompt = await this.brainCoordinator.optimizeImagePrompt(prompt, context);
+      } catch (error) {
+        console.warn('[ImageAnalyzer] Ошибка оптимизации промпта мозгом:', error.message);
+        // Продолжаем с базовым промптом
+      }
+    }
+
+    return prompt;
+  }
+
+  /**
+   * Генерация сообщения для чата напрямую через Gemini на основе скриншота
+   * ИМБА: Gemini видит стрим и сразу генерирует сообщение!
+   */
+  async generateChatMessageFromScreenshot(imageBuffer, context = {}) {
+    if (!this.useProxyAPI || !imageBuffer) {
+      return null;
+    }
+
     try {
+      const {
+        speechText = null,
+        recentSpeechFragments = [],
+        chatHistory = [],
+        streamContext = {},
+        botUsername = 'медвед12sensei',
+        isFirstMessage = false,
+        sessionHistory = null, // История сессии
+      } = context;
+
+      // Формируем контекст речи
+      let speechContext = '';
+      
+      // Сначала проверяем recentSpeechFragments (реалтайм речь)
+      if (recentSpeechFragments && recentSpeechFragments.length > 0) {
+        // Берем фрагменты стримера (по isStreamer или по префиксу [СТРИМЕР])
+        // Оптимизировано: объединяем filter/map/filter в один проход
+        const streamerFragments = [];
+        const prefixRegex = /^\[(?:СТРИМЕР|ГОСТЬ)\]\s*/;
+        
+        for (let i = recentSpeechFragments.length - 1; i >= 0 && streamerFragments.length < 5; i--) {
+          const f = recentSpeechFragments[i];
+          
+          // Проверяем isStreamer или наличие префикса [СТРИМЕР] в тексте
+          if (f.isStreamer === true || (f.text && f.text.includes('[СТРИМЕР]'))) {
+            const text = (f.text || '').replace(prefixRegex, '').trim();
+            
+            // Фильтруем артефакты распознавания речи
+            if (this.filterSpeechArtifacts(text)) {
+              streamerFragments.unshift(text);
+            } else {
+              console.log(`[ImageAnalyzer] ⚠️ Отфильтрован артефакт распознавания: "${text}"`);
+            }
+          }
+        }
+        
+        if (streamerFragments.length > 0) {
+          speechContext = `\nРЕЧЬ СТРИМЕРА (последние фрагменты):\n${streamerFragments.join('\n')}\n`;
+          console.log(`[ImageAnalyzer] 📢 Используем реалтайм речь стримера: ${streamerFragments.length} фрагментов`);
+        } else {
+          // Если нет фрагментов стримера, берем все фрагменты (может быть только речь гостей)
+          // Оптимизировано: объединяем map/filter в один проход
+          const allFragments = [];
+          const prefixRegex = /^\[(?:СТРИМЕР|ГОСТЬ)\]\s*/;
+          
+          for (let i = recentSpeechFragments.length - 1; i >= 0 && allFragments.length < 5; i--) {
+            const f = recentSpeechFragments[i];
+            const text = (f.text || '').replace(prefixRegex, '').trim();
+            
+            // Фильтруем артефакты (кроме "молчание", "тишина", "пауза" - это может быть реальная речь)
+            if (text && text.length >= 2) {
+              const lowerText = text.toLowerCase();
+              const isArtifact = lowerText === 'неразборчиво' || lowerText === 'непонятно' ||
+                lowerText === 'максимум' || lowerText === 'максима' || lowerText === 'максим' ||
+                lowerText === 'звук' || lowerText === 'звуки' || lowerText === 'шум' || lowerText === 'шумов' ||
+                (text.length < 5 && (lowerText.includes('максим') || lowerText.includes('звук') || lowerText.includes('шум')));
+              
+              if (!isArtifact) {
+                allFragments.unshift(text);
+              } else {
+                console.log(`[ImageAnalyzer] ⚠️ Отфильтрован артефакт распознавания: "${text}"`);
+              }
+            }
+          }
+          
+          if (allFragments.length > 0) {
+            speechContext = `\nРЕЧЬ (последние фрагменты):\n${allFragments.join('\n')}\n`;
+            console.log(`[ImageAnalyzer] 📢 Используем реалтайм речь (все фрагменты): ${allFragments.length} фрагментов`);
+          }
+        }
+      }
+      
+      // Если нет реалтайм речи, используем speechText
+      if (!speechContext && speechText && speechText.text) {
+        const speechTextClean = speechText.text.trim();
+        if (speechTextClean && speechTextClean !== 'молчание') {
+          speechContext = `\nРЕЧЬ СТРИМЕРА:\n${speechTextClean}\n`;
+          console.log(`[ImageAnalyzer] 📢 Используем speechText: "${speechTextClean.substring(0, 50)}..."`);
+        }
+      }
+      
+      // Если все еще нет речи, выводим предупреждение
+      if (!speechContext) {
+        console.log(`[ImageAnalyzer] ⚠️ Речь не передана в контекст. recentSpeechFragments: ${recentSpeechFragments?.length || 0}, speechText: ${speechText?.text ? 'есть' : 'нет'}`);
+      }
+
+      // Получаем историю сессии для контекста
+      let historyContext = '';
+      if (sessionHistory && typeof sessionHistory.getHistoryContext === 'function') {
+        historyContext = sessionHistory.getHistoryContext(10, 5, 5); // Последние 10 речи, 5 событий, 5 сообщений
+      }
+
+      // Упрощенный промпт - одна нейронка получает инструкцию, изображение, речь и историю
+      const prompt = `Ты собеседник стримера в Twitch чате. Твое имя: ${botUsername}.
+
+СТИЛЬ ОБЩЕНИЯ:
+- Пиши ТОЛЬКО на РУССКОМ языке
+- Сообщения короткие: 5-50 символов (ОБЯЗАТЕЛЬНО!)
+- Будь НЕФОРМАЛЬНЫМ и ЧЕЛОВЕЧНЫМ - пиши как обычный человек в чате, не как бот!
+- Используй разговорный стиль, сленг, сокращения (если уместно)
+- Будь естественным - не пытайся быть слишком умным или формальным
+- Реагируй на события как обычный зритель - эмоционально, но естественно
+- Будь РАЗНООБРАЗНЫМ - не повторяйся! Каждое сообщение должно быть уникальным
+- Используй разные формулировки, разные реакции, разные эмоции
+
+ПРАВИЛА:
+- Верни "null" ТОЛЬКО если хочешь промолчать В остальных случаях ВСЕГДА пиши сообщение - комментируй, реагируй, шути!
+- Помни предыдущие события - используй историю для контекста
+- ЗАПРЕЩЕНО использовать обычные эмодзи (👋, 😂, 😊, 🎉 и т.д.) - ТОЛЬКО 7TV эмодзи разрешены!
+- ПУНКТУАЦИЯ ЗАПРЕЩЕНА! НЕ используй точки, запятые, восклицательные знаки, вопросительные знаки, двоеточия, тире и любую другую пунктуацию! Пиши БЕЗ пунктуации вообще!
+- НЕ задавай вопросы постоянно! Используй вопросы изредка, чаще пиши утверждения и комментарии
+- НЕ повторяй предыдущие сообщения - будь разнообразным!
+- НЕ пиши многострочные сообщения - только ОДНА строка!
+- НЕ используй префиксы типа "nextlevel:", "username:" и т.д. - пиши просто текст!
+
+${historyContext}${speechContext}
+
+Смотри на скриншот стрима и реагируй на события, комментируй, шути. Будь собеседником стримера. 
+
+ВАЖНО: 
+- Будь РАЗНООБРАЗНЫМ - каждое сообщение должно быть уникальным! Не повторяйся!
+- Будь НЕФОРМАЛЬНЫМ и ЧЕЛОВЕЧНЫМ - пиши как обычный человек, не как бот!
+- Не задавай вопросы постоянно - чаще пиши утверждения и комментарии
+- Реагируй на речь стримера, если она есть в контексте
+- Используй разные формулировки, разные реакции, разные эмоции
+- Верни "null" ТОЛЬКО если скриншот полностью черный/пустой или стрим не запущен. В остальных случаях ВСЕГДА пиши сообщение - комментируй, реагируй, шути!`;
+
+      // Отправляем запрос к Gemini с изображением и промптом
       const base64Image = imageBuffer.toString('base64');
-
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-4o', // Используем актуальную модель (gpt-4-vision-preview устарела)
-        messages: [
-          {
-            role: 'user',
-            content: [
+      const response = await axios.post(
+        `${this.proxyAPIBaseUrl}/google/v1beta/models/${this.proxyAPIVisionModel}:generateContent`,
+        {
+          contents: [{
+            parts: [
               {
-                type: 'text',
-                text: `Извлеки ВЕСЬ текст, который виден на этом скриншоте Twitch стрима.
-
-ТРЕБОВАНИЯ:
-1. Перечисли ВСЕ текстовые элементы построчно
-2. Включи: интерфейс игры (HUD), меню, подсказки, названия
-3. Включи: все числа, счёт, таймеры, статистику
-4. Включи: текст из чата Twitch (если виден)
-5. Включи: уведомления, всплывающие окна, сообщения
-6. Включи: названия предметов, способностей, локаций, персонажей
-7. Сохрани порядок и расположение текста (сверху вниз, слева направо)
-8. Если текст частично скрыт - укажи что видно
-
-ФОРМАТ:
-- Каждая строка текста с новой строки
-- Группируй по областям экрана (интерфейс, чат, уведомления)
-- Сохраняй точное написание (регистр, пунктуация)
-
-Отвечай ТОЛЬКО текстом, без дополнительных комментариев или объяснений.`,
-              },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: `data:image/png;base64,${base64Image}`,
-                  detail: 'high', // Максимальное качество для лучшего распознавания
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: base64Image,
                 },
               },
+              { text: prompt },
             ],
+          }],
+          generationConfig: {
+            temperature: 0.8,
+            topP: 0.9,
+            topK: 40,
+            maxOutputTokens: 50, // Короткие сообщения
           },
-        ],
-        max_tokens: 800,
-      });
+        },
+        {
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${this.proxyAPIKey}`,
+          },
+          timeout: 60000,
+        }
+      );
 
-      return response.choices[0].message.content;
+      let generatedText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      
+      if (!generatedText) {
+        return null;
+      }
+
+      // Очищаем от лишних пробелов
+      generatedText = generatedText.trim();
+      
+      // Если ответ "null" (в любом регистре) - молчим
+      if (generatedText.toLowerCase() === 'null') {
+        return null;
+      }
+      
+      // Убираем "null" в конце сообщения, если оно есть
+      generatedText = generatedText.replace(/\s+null\s*$/i, '').trim();
+      
+      // УДАЛЯЕМ ОБЫЧНЫЕ ЭМОДЗИ (Unicode эмодзи) - разрешены только 7TV эмодзи
+      const emojiPattern = /[\u{1F300}-\u{1F9FF}]|[\u{2600}-\u{26FF}]|[\u{2700}-\u{27BF}]|[\u{1F600}-\u{1F64F}]|[\u{1F680}-\u{1F6FF}]|[\u{1F1E0}-\u{1F1FF}]|[\u{1F900}-\u{1F9FF}]|[\u{1FA00}-\u{1FA6F}]|[\u{1FA70}-\u{1FAFF}]/gu;
+      const emojiCount = (generatedText.match(emojiPattern) || []).length;
+      if (emojiCount > 0) {
+        console.log(`[ImageAnalyzer] ⚠️ Сообщение содержит обычные эмодзи (${emojiCount} шт.), удаляем`);
+        generatedText = generatedText.replace(emojiPattern, '').trim();
+      }
+      
+      // Удаляем префиксы типа "Я:", "Бот:", "[БОТ]", "nextlevel:", "username:" и т.д.
+      generatedText = generatedText.replace(/^(?:\[?БОТ\]?|Я:|Бот:|Bot:)\s*/i, '').trim();
+      // Удаляем префиксы типа "nextlevel:", "username:", "nickname:" и т.д.
+      generatedText = generatedText.replace(/^[a-z0-9_]+:\s*/i, '').trim();
+      
+      // Удаляем markdown форматирование
+      generatedText = generatedText.replace(/\*\*([^*]+)\*\*/g, '$1');
+      generatedText = generatedText.replace(/\*([^*]+)\*/g, '$1');
+      generatedText = generatedText.replace(/__([^_]+)__/g, '$1');
+      generatedText = generatedText.replace(/_([^_]+)_/g, '$1');
+      
+      // Удаляем кавычки в начале и конце
+      generatedText = generatedText.replace(/^["'«»]|["'«»]$/g, '').trim();
+      
+      // Обрабатываем многострочные сообщения - оставляем только первую строку
+      if (generatedText.includes('\n')) {
+        const firstLine = generatedText.split('\n')[0].trim();
+        console.log(`[ImageAnalyzer] ⚠️ Сообщение многострочное, оставляем только первую строку: "${firstLine}"`);
+        generatedText = firstLine;
+      }
+      
+      // УДАЛЯЕМ ВСЮ ПУНКТУАЦИЮ - жесткий запрет на пунктуацию
+      // Удаляем все знаки препинания: точки, запятые, восклицательные, вопросительные, двоеточия, тире и т.д.
+      generatedText = generatedText.replace(/[.,!?:;—–\-]/g, '').trim();
+      
+      // Ограничиваем длину сообщения до 50 символов
+      if (generatedText.length > 50) {
+        console.log(`[ImageAnalyzer] ⚠️ Сообщение слишком длинное (${generatedText.length} символов), обрезаем до 50`);
+        generatedText = generatedText.substring(0, 50).trim();
+        // Удаляем обрезанное слово в конце, если оно неполное
+        const lastSpace = generatedText.lastIndexOf(' ');
+        if (lastSpace > 30) {
+          generatedText = generatedText.substring(0, lastSpace).trim();
+        }
+      }
+      
+      // Фильтруем повторяющиеся слова/фразы (например, "GEGE GEGE GEGE")
+      const words = generatedText.split(/\s+/);
+      if (words.length > 2) {
+        // Проверяем, есть ли повторяющиеся слова подряд
+        let repeatedCount = 0;
+        let lastWord = '';
+        for (const word of words) {
+          if (word.toLowerCase() === lastWord.toLowerCase()) {
+            repeatedCount++;
+            if (repeatedCount >= 2) {
+              // Если одно слово повторяется 3+ раза подряд - это мусор
+              console.log(`[ImageAnalyzer] ⚠️ Отфильтровано сообщение с повторяющимися словами: "${generatedText}"`);
+              return null;
+            }
+          } else {
+            repeatedCount = 0;
+          }
+          lastWord = word;
+        }
+        
+        // Проверяем общее количество уникальных слов
+        const uniqueWords = new Set(words.map(w => w.toLowerCase()));
+        if (uniqueWords.size < words.length * 0.3 && words.length > 3) {
+          // Если уникальных слов меньше 30% от общего количества - это повторения
+          console.log(`[ImageAnalyzer] ⚠️ Отфильтровано сообщение с множественными повторениями: "${generatedText}"`);
+          return null;
+        }
+      }
+      
+      // Если после очистки ничего не осталось - молчим
+      if (!generatedText || generatedText.length < 2) {
+        return null;
+      }
+
+      return {
+        text: generatedText,
+        confidence: 0.9,
+        timestamp: Date.now(),
+        source: 'gemini_direct',
+      };
     } catch (error) {
-      console.error('[ImageAnalyzer] Ошибка извлечения текста:', error);
+      console.error(`[ImageAnalyzer] Ошибка генерации сообщения через Gemini:`, error.message);
       return null;
     }
   }

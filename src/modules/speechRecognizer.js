@@ -19,6 +19,10 @@ export class SpeechRecognizer {
         modelPath: config.localWhisperModel || 'base',
         device: config.localWhisperDevice || 'cpu',
         language: 'ru',
+        computeType: config.localWhisperComputeType || 'int8',
+        beamSize: config.localWhisperBeamSize || 1,
+        bestOf: 1,
+        temperature: 0.0, // Greedy decoding для максимальной скорости
       });
     } else if (this.useProxyAPI) {
       // Используем ProxyAPI
@@ -37,22 +41,51 @@ export class SpeechRecognizer {
       });
     }
     
-    this.audioCache = new Map();
+    // Накопительный буфер текста для режима реального времени
+    this.realtimeTextBuffer = [];
+    this.maxBufferSize = 20; // Храним последние 20 распознанных фрагментов
+    this.realtimeText = ''; // Текущий полный текст
+    this.lastUpdateTime = Date.now();
   }
 
   async init() {
     if (this.useLocal && this.localWhisper) {
-      await this.localWhisper.init();
+      const localWhisperAvailable = await this.localWhisper.init();
+      // Если локальный Whisper недоступен (скрипт не найден), переключаемся на ProxyAPI
+      if (!localWhisperAvailable && this.useProxyAPI) {
+        console.warn('[SpeechRecognizer] ⚠️ Локальный Whisper недоступен, переключаюсь на ProxyAPI');
+        this.useLocal = false;
+        this.localWhisper = null;
+        // Убеждаемся, что openai инициализирован для ProxyAPI
+        if (!this.openai && this.proxyAPI) {
+          this.openai = this.proxyAPI.getOpenAIClient();
+        }
+      } else if (!localWhisperAvailable && !this.useProxyAPI) {
+        console.error('[SpeechRecognizer] ❌ Локальный Whisper недоступен и ProxyAPI не включен!');
+        console.error('[SpeechRecognizer] 💡 Установите USE_PROXYAPI=true в .env для использования ProxyAPI Whisper');
+      }
+    }
+    
+    // Убеждаемся, что openai инициализирован
+    if (!this.openai) {
+      if (this.useProxyAPI && this.proxyAPI) {
+        this.openai = this.proxyAPI.getOpenAIClient();
+      } else if (!this.useLocal) {
+        // Используем прямой OpenAI API
+        this.openai = new OpenAI({
+          apiKey: this.config.apiKey,
+        });
+      }
     }
   }
 
   /**
    * Распознавание из буфера (потоковый режим)
    * Принимает аудио буфер и распознает речь
+   * Обновляет накопительный буфер текста для режима реального времени
    */
   async recognizeFromStream(audioBuffer) {
     if (!audioBuffer || audioBuffer.length === 0) {
-      console.log('[SpeechRecognizer] ⚠️ Пустой аудио буфер');
       return {
         text: null,
         confidence: 0,
@@ -60,56 +93,66 @@ export class SpeechRecognizer {
       };
     }
 
-    console.log(`[SpeechRecognizer] 🎤 Получен аудио буфер: ${audioBuffer.length} байт (потоковый режим)`);
-
     try {
-      // Используем локальный Whisper если включен
-      if (this.useLocal && this.localWhisper) {
-        console.log('[SpeechRecognizer] 🎤 Используется локальный Whisper (поток)');
-        const result = await this.localWhisper.recognizeFromStream(audioBuffer);
-        if (result.text) {
-          console.log(`[SpeechRecognizer] ✅ РАСПОЗНАННЫЙ ТЕКСТ: "${result.text}"`);
-          console.log(`[SpeechRecognizer] 📊 Уверенность: ${(result.confidence * 100).toFixed(1)}%`);
-        } else {
-          console.log('[SpeechRecognizer] ⚠️ Речь не распознана (пустой результат)');
-        }
-        return result;
-      }
-
-      // Иначе используем OpenAI API
-      const tempPath = path.join(__dirname, '../../temp_audio.mp3');
-      await fs.writeFile(tempPath, audioBuffer);
-
-      const whisperModel = this.useProxyAPI 
-        ? (this.config.proxyAPIWhisperModel || 'gpt-4o-transcribe')
-        : 'whisper-1';
+      let result;
       
-      console.log(`[SpeechRecognizer] 🎤 Распознавание через ${this.useProxyAPI ? 'ProxyAPI' : 'OpenAI'} (модель: ${whisperModel})`);
-      const transcription = await this.openai.audio.transcriptions.create({
-        file: await fs.readFile(tempPath),
-        model: whisperModel,
-        language: 'ru',
-        response_format: 'verbose_json',
-      });
-
-      await fs.unlink(tempPath).catch(() => {});
-
-      const result = {
-        text: transcription.text,
-        confidence: transcription.segments?.[0]?.no_speech_prob 
-          ? 1 - transcription.segments[0].no_speech_prob 
-          : 0.8,
-        language: transcription.language,
-        segments: transcription.segments,
-        timestamp: Date.now(),
-      };
-
-      if (result.text) {
-        console.log(`[SpeechRecognizer] ✅ РАСПОЗНАННЫЙ ТЕКСТ: "${result.text}"`);
-        console.log(`[SpeechRecognizer] 📊 Уверенность: ${(result.confidence * 100).toFixed(1)}%, Язык: ${result.language}`);
-      } else {
-        console.log('[SpeechRecognizer] ⚠️ Речь не распознана (пустой результат)');
+      // Используем локальный Whisper если включен и доступен
+      if (this.useLocal && this.localWhisper) {
+        try {
+          result = await this.localWhisper.recognizeFromStream(audioBuffer);
+        } catch (error) {
+          // Если локальный Whisper упал (скрипт не найден), переключаемся на ProxyAPI
+          if (error.message.includes('whisper_local.py не найден') && this.useProxyAPI) {
+            console.warn('[SpeechRecognizer] ⚠️ Локальный Whisper недоступен, переключаюсь на ProxyAPI');
+            this.useLocal = false;
+            this.localWhisper = null;
+            // Продолжаем с ProxyAPI ниже
+          } else {
+            throw error;
+          }
+        }
       }
+      
+      // Используем ProxyAPI или OpenAI API если локальный Whisper не используется
+      if (!this.useLocal || !this.localWhisper) {
+        // Используем OpenAI API через память (без постоянных файлов)
+        // Используем временный файл в памяти через Blob/File API если доступен
+        // Иначе используем временный файл, но удаляем сразу после использования
+        const whisperModel = this.useProxyAPI 
+          ? (this.config.proxyAPIWhisperModel || 'gpt-4o-transcribe')
+          : 'whisper-1';
+        
+        // OpenAI SDK требует File или путь к файлу
+        // Используем временный файл, но удаляем сразу после использования
+        const tempPath = path.join(__dirname, '../../temp_audio.mp3');
+        await fs.writeFile(tempPath, audioBuffer);
+        
+        try {
+          const transcription = await this.openai.audio.transcriptions.create({
+            file: await fs.readFile(tempPath),
+            model: whisperModel,
+            language: 'ru',
+            response_format: 'verbose_json',
+          });
+
+          result = {
+            text: transcription.text,
+            confidence: transcription.segments?.[0]?.no_speech_prob 
+              ? 1 - transcription.segments[0].no_speech_prob 
+              : 0.8,
+            language: transcription.language,
+            segments: transcription.segments,
+            timestamp: Date.now(),
+          };
+        } finally {
+          // Удаляем файл сразу после использования
+          await fs.unlink(tempPath).catch(() => {});
+        }
+      }
+      
+      // НЕ обновляем накопительный буфер здесь - это будет сделано в coordinator
+      // после идентификации говорящего и фильтрации (только стример, не донаты)
+      // Буфер обновляется через updateRealtimeTextBuffer из coordinator
 
       return result;
     } catch (error) {
@@ -122,32 +165,64 @@ export class SpeechRecognizer {
       };
     }
   }
-
-  async recognizeFromFile(filePath) {
-    try {
-      const audioBuffer = await fs.readFile(filePath);
-      return await this.recognizeFromStream(audioBuffer);
-    } catch (error) {
-      console.error('[SpeechRecognizer] Ошибка чтения файла:', error);
-      return {
-        text: null,
-        confidence: 0,
-        error: error.message,
-        timestamp: Date.now(),
-      };
-    }
-  }
-
-  // Метод для захвата аудио из браузера (требует дополнительной реализации)
-  async captureAudioFromBrowser(page) {
-    // Это сложная задача, требующая использования Web Audio API
-    // или специальных расширений браузера
-    // В реальной реализации можно использовать:
-    // 1. Puppeteer/Playwright с расширениями для захвата аудио
-    // 2. Внешние инструменты типа FFmpeg для захвата системного аудио
-    // 3. API Twitch для получения аудио потока напрямую
+  
+  /**
+   * Обновление накопительного буфера текста
+   */
+  updateRealtimeTextBuffer(text, timestamp) {
+    // Добавляем новый фрагмент
+    this.realtimeTextBuffer.push({
+      text: text.trim(),
+      timestamp: timestamp || Date.now(),
+    });
     
-    console.warn('[SpeechRecognizer] Захват аудио из браузера требует дополнительной реализации');
-    return null;
+    // Ограничиваем размер буфера
+    if (this.realtimeTextBuffer.length > this.maxBufferSize) {
+      this.realtimeTextBuffer.shift();
+    }
+    
+    // Обновляем полный текст (последние N фрагментов)
+    this.realtimeText = this.realtimeTextBuffer
+      .slice(-this.maxBufferSize)
+      .map(item => item.text)
+      .join(' ');
+    
+    this.lastUpdateTime = Date.now();
+  }
+  
+  /**
+   * Получить текущий накопительный текст (для мозга)
+   * @param {number} lastSeconds - Получить текст за последние N секунд (по умолчанию все)
+   * @returns {string} Текущий текст
+   */
+  getCurrentText(lastSeconds = null) {
+    if (!lastSeconds) {
+      return this.realtimeText;
+    }
+    
+    const cutoffTime = Date.now() - (lastSeconds * 1000);
+    const recentFragments = this.realtimeTextBuffer.filter(
+      item => item.timestamp >= cutoffTime
+    );
+    
+    return recentFragments.map(item => item.text).join(' ');
+  }
+  
+  /**
+   * Получить последние N фрагментов текста
+   * @param {number} count - Количество фрагментов
+   * @returns {Array} Массив фрагментов с текстом и временем
+   */
+  getRecentFragments(count = 5) {
+    return this.realtimeTextBuffer.slice(-count);
+  }
+  
+  /**
+   * Очистить буфер текста
+   */
+  clearTextBuffer() {
+    this.realtimeTextBuffer = [];
+    this.realtimeText = '';
+    this.lastUpdateTime = Date.now();
   }
 }

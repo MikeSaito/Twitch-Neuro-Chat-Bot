@@ -42,13 +42,14 @@ export class LocalVoiceIdentifier {
   async init() {
     await this.loadVoicesDatabase();
     
-    // Инициализируем профиль стримера
-    if (!this.voicesDatabase.has('streamer')) {
-      this.voicesDatabase.set('streamer', {
+    // Инициализируем или восстанавливаем профиль стримера
+    let streamerProfile = this.voicesDatabase.get('streamer');
+    if (!streamerProfile) {
+      streamerProfile = {
         id: 'streamer',
         name: this.streamerName,
         type: 'streamer',
-        patterns: this.streamerPatterns,
+        patterns: [...this.streamerPatterns], // Копируем массив паттернов
         audioFeatures: {
           avgPitch: null, // Будет вычисляться
           avgVolume: null,
@@ -58,8 +59,19 @@ export class LocalVoiceIdentifier {
         confidence: 0.8,
         learnedAt: Date.now(),
         lastSeen: Date.now(),
-      });
+      };
+      this.voicesDatabase.set('streamer', streamerProfile);
       await this.saveVoicesDatabase();
+    } else {
+      // Восстанавливаем паттерны если они пустые или повреждены
+      if (!streamerProfile.patterns || streamerProfile.patterns.length === 0 || 
+          streamerProfile.patterns.every(p => !(p instanceof RegExp) && Object.keys(p || {}).length === 0)) {
+        streamerProfile.patterns = [...this.streamerPatterns];
+        streamerProfile.name = this.streamerName; // Обновляем имя на случай изменения
+        this.voicesDatabase.set('streamer', streamerProfile);
+        await this.saveVoicesDatabase();
+        console.log('[LocalVoiceIdentifier] ✅ Восстановлены паттерны стримера');
+      }
     }
   }
 
@@ -70,6 +82,58 @@ export class LocalVoiceIdentifier {
       
       const data = await fs.readFile(this.voicesFilePath, 'utf-8');
       const voices = JSON.parse(data);
+      
+      // Восстанавливаем паттерны из строк в RegExp
+      for (const [id, profile] of Object.entries(voices)) {
+        if (profile.patterns && Array.isArray(profile.patterns)) {
+          const restoredPatterns = [];
+          let hasValidPatterns = false;
+          
+          for (let i = 0; i < profile.patterns.length; i++) {
+            const p = profile.patterns[i];
+            // Если это строка - создаем RegExp
+            if (typeof p === 'string' && p.length > 0) {
+              try {
+                // Формат: "/pattern/flags" или просто "pattern"
+                const match = p.match(/^\/(.+)\/([gimuy]*)$/);
+                if (match) {
+                  restoredPatterns.push(new RegExp(match[1], match[2] || 'i'));
+                  hasValidPatterns = true;
+                } else {
+                  restoredPatterns.push(new RegExp(p, 'i'));
+                  hasValidPatterns = true;
+                }
+              } catch (e) {
+                // Если не удалось создать RegExp из строки - используем дефолтный
+                if (id === 'streamer' && i < this.streamerPatterns.length) {
+                  restoredPatterns.push(this.streamerPatterns[i]);
+                  hasValidPatterns = true;
+                }
+              }
+            } else if (p instanceof RegExp) {
+              // Уже RegExp - оставляем как есть
+              restoredPatterns.push(p);
+              hasValidPatterns = true;
+            } else {
+              // Пустой объект или null - восстанавливаем из дефолтных для стримера
+              if (id === 'streamer' && i < this.streamerPatterns.length) {
+                restoredPatterns.push(this.streamerPatterns[i]);
+                hasValidPatterns = true;
+              }
+            }
+          }
+          
+          // Если паттерны пустые или невалидные - восстанавливаем дефолтные для стримера
+          if (!hasValidPatterns && id === 'streamer') {
+            profile.patterns = [...this.streamerPatterns];
+          } else {
+            profile.patterns = restoredPatterns;
+          }
+        } else if (id === 'streamer') {
+          // Если паттернов вообще нет - создаем дефолтные
+          profile.patterns = [...this.streamerPatterns];
+        }
+      }
       
       this.voicesDatabase = new Map(Object.entries(voices));
       console.log(`[LocalVoiceIdentifier] Загружено ${this.voicesDatabase.size} голосовых профилей`);
@@ -88,7 +152,22 @@ export class LocalVoiceIdentifier {
       const dataDir = path.dirname(this.voicesFilePath);
       await fs.mkdir(dataDir, { recursive: true });
       
-      const voicesObj = Object.fromEntries(this.voicesDatabase);
+      // Конвертируем RegExp в строки для сохранения
+      const voicesObj = {};
+      for (const [id, profile] of this.voicesDatabase.entries()) {
+        const profileCopy = { ...profile };
+        if (profileCopy.patterns && Array.isArray(profileCopy.patterns)) {
+          profileCopy.patterns = profileCopy.patterns.map(p => {
+            if (p instanceof RegExp) {
+              // Сохраняем как строку "/pattern/flags"
+              return p.toString();
+            }
+            return p;
+          });
+        }
+        voicesObj[id] = profileCopy;
+      }
+      
       await fs.writeFile(this.voicesFilePath, JSON.stringify(voicesObj, null, 2));
     } catch (error) {
       console.error('[LocalVoiceIdentifier] Ошибка сохранения:', error);
@@ -329,8 +408,42 @@ export class LocalVoiceIdentifier {
 
     // 6. Если анализ текста показал стримера или гостя, но нет точного совпадения
     if (textAnalysis && textAnalysis.type !== 'donation') {
+      const speakerId = textAnalysis.type === 'streamer' ? 'streamer' : `guest_${Date.now()}`;
+      
+      // Если это стример - обновляем профиль даже без точного совпадения
+      if (textAnalysis.type === 'streamer') {
+        const streamerProfile = this.voicesDatabase.get('streamer');
+        if (streamerProfile) {
+          // Обновляем параметры голоса если есть
+          if (audioFeatures) {
+            if (!streamerProfile.audioFeatures.avgVolume) {
+              streamerProfile.audioFeatures = { ...audioFeatures };
+            } else {
+              streamerProfile.audioFeatures.avgVolume = (streamerProfile.audioFeatures.avgVolume * 0.7) + (audioFeatures.avgVolume * 0.3);
+              if (audioFeatures.avgPitch) {
+                streamerProfile.audioFeatures.avgPitch = (streamerProfile.audioFeatures.avgPitch * 0.7) + (audioFeatures.avgPitch * 0.3);
+              }
+              if (audioFeatures.speechRate) {
+                streamerProfile.audioFeatures.speechRate = (streamerProfile.audioFeatures.speechRate * 0.7) + (audioFeatures.speechRate * 0.3);
+              }
+            }
+          }
+          
+          // Добавляем пример
+          streamerProfile.examples.push({
+            text: text.substring(0, 100),
+            timestamp: Date.now(),
+          });
+          if (streamerProfile.examples.length > 10) {
+            streamerProfile.examples.shift();
+          }
+          streamerProfile.lastSeen = Date.now();
+          await this.saveVoicesDatabase();
+        }
+      }
+      
       return {
-        speaker: textAnalysis.type === 'streamer' ? 'streamer' : `guest_${Date.now()}`,
+        speaker: speakerId,
         confidence: textAnalysis.confidence,
         type: textAnalysis.type,
         isStreamer: textAnalysis.type === 'streamer',
@@ -340,14 +453,33 @@ export class LocalVoiceIdentifier {
       };
     }
 
-    // 7. По умолчанию - неизвестный, но не игнорируем (может быть стример)
+    // 7. По умолчанию - предполагаем стримера (если нет явных признаков гостя)
+    // Это важно для работы бота - лучше ошибиться в пользу стримера
+    const streamerProfile = this.voicesDatabase.get('streamer');
+    if (streamerProfile && audioFeatures) {
+      // Обновляем параметры голоса даже для неизвестной речи
+      if (!streamerProfile.audioFeatures.avgVolume) {
+        streamerProfile.audioFeatures = { ...audioFeatures };
+      } else {
+        streamerProfile.audioFeatures.avgVolume = (streamerProfile.audioFeatures.avgVolume * 0.9) + (audioFeatures.avgVolume * 0.1);
+        if (audioFeatures.avgPitch) {
+          streamerProfile.audioFeatures.avgPitch = (streamerProfile.audioFeatures.avgPitch * 0.9) + (audioFeatures.avgPitch * 0.1);
+        }
+        if (audioFeatures.speechRate) {
+          streamerProfile.audioFeatures.speechRate = (streamerProfile.audioFeatures.speechRate * 0.9) + (audioFeatures.speechRate * 0.1);
+        }
+      }
+      streamerProfile.lastSeen = Date.now();
+      await this.saveVoicesDatabase();
+    }
+    
     return {
-      speaker: 'unknown',
-      confidence: 0.3,
-      type: 'unknown',
-      isStreamer: false, // Не уверены, но не игнорируем
-      shouldIgnore: false, // Обрабатываем на всякий случай
-      name: 'неизвестный',
+      speaker: 'streamer', // По умолчанию считаем стримером
+      confidence: 0.5, // Средняя уверенность
+      type: 'streamer',
+      isStreamer: true, // По умолчанию стример
+      shouldIgnore: false,
+      name: this.streamerName,
     };
   }
 }

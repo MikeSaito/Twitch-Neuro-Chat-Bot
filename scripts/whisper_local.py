@@ -6,19 +6,37 @@ from faster_whisper import WhisperModel
 audio_path = sys.argv[1]
 model_size = sys.argv[2]
 language = sys.argv[3]
-device = sys.argv[4]
+device = sys.argv[4].lower() if len(sys.argv) > 4 else "cpu"  # Нормализуем к нижнему регистру
+compute_type = sys.argv[5] if len(sys.argv) > 5 else "int8"
+beam_size = int(sys.argv[6]) if len(sys.argv) > 6 else 1
+best_of = int(sys.argv[7]) if len(sys.argv) > 7 else 1
+temperature = float(sys.argv[8]) if len(sys.argv) > 8 else 0.0
+compression_ratio_threshold = float(sys.argv[9]) if len(sys.argv) > 9 else 2.4
+logprob_threshold = float(sys.argv[10]) if len(sys.argv) > 10 else -1.0
+no_speech_threshold = float(sys.argv[11]) if len(sys.argv) > 11 else 0.6
 
 try:
-    model = WhisperModel(model_size, device=device, compute_type="int8")
-    # Отключаем VAD фильтр и используем auto-detect языка для лучшего распознавания
-    # Если язык указан, используем его, иначе auto-detect
+    # Используем переданные параметры для оптимизации скорости
+    # Убеждаемся, что device в нижнем регистре
+    model = WhisperModel(model_size, device=device.lower(), compute_type=compute_type)
+    
+    # Оптимизированные параметры для скорости
     transcribe_params = {
-        "beam_size": 5,
-        "vad_filter": False,  # Отключаем VAD фильтр для теста
-        "vad_parameters": {"threshold": 0.3}  # Более мягкий порог VAD если нужен
+        "beam_size": beam_size,  # Уменьшаем для ускорения (1 = greedy, быстрее всего)
+        "best_of": best_of,  # Уменьшаем для ускорения
+        "temperature": temperature,  # 0 для greedy decoding (быстрее всего)
+        "compression_ratio_threshold": compression_ratio_threshold,
+        "log_prob_threshold": logprob_threshold,
+        "no_speech_threshold": no_speech_threshold,
+        "vad_filter": False,  # Отключаем VAD для ускорения
+        "condition_on_previous_text": False,  # Отключаем для ускорения (не используем предыдущий контекст)
+        "initial_prompt": None,  # Без промпта для ускорения
+        "word_timestamps": False,  # Отключаем для ускорения
     }
+    
     if language and language != "auto":
         transcribe_params["language"] = language
+    
     segments, info = model.transcribe(audio_path, **transcribe_params)
     
     text_parts = []
@@ -28,11 +46,11 @@ try:
     has_speech = False
     
     for segment in segments:
-        # Сохраняем все сегменты для диагностики, но фильтруем по no_speech_prob
+        # Сохраняем все сегменты для диагностики
         no_speech_prob = getattr(segment, 'no_speech_prob', 0)
         segment_text = segment.text.strip()
         
-        # Сохраняем все сегменты (даже с тишиной) для диагностики
+        # Сохраняем все сегменты
         all_segments.append({
             "start": segment.start,
             "end": segment.end,
@@ -40,8 +58,8 @@ try:
             "no_speech_prob": no_speech_prob
         })
         
-        # Добавляем в результат все сегменты с текстом (убрали фильтр по no_speech_prob для теста)
-        if segment_text:  # Добавляем все сегменты с текстом
+        # Добавляем в результат все сегменты с текстом
+        if segment_text:
             has_speech = True
             text_parts.append(segment_text)
             if hasattr(segment, 'avg_logprob'):

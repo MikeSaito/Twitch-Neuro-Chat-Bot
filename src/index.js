@@ -3,16 +3,13 @@ import readline from 'readline';
 import { VirtualBrowser } from './modules/browser.js';
 import { ImageAnalyzer } from './modules/imageAnalyzer.js';
 import { SpeechRecognizer } from './modules/speechRecognizer.js';
-import { MessageGenerator } from './modules/messageGenerator.js';
 import { LocalVoiceIdentifier } from './modules/localVoiceIdentifier.js';
 import { Coordinator } from './modules/coordinator.js';
 import { TwitchClient } from './twitchClient.js';
 import { DataCollector } from './modules/dataCollector.js';
 import { BrainCoordinator } from './modules/brainCoordinator.js';
-import { BrainAssistant } from './modules/brainAssistant.js';
-import { ChatReader } from './modules/chatReader.js';
-import { RightHand } from './modules/rightHand.js';
 import { BrainTrainer } from './modules/brainTrainer.js';
+import { SessionHistory } from './modules/sessionHistory.js';
 
 class TwitchNeuroBot {
   constructor() {
@@ -20,34 +17,34 @@ class TwitchNeuroBot {
       browser: null,
       imageAnalyzer: null,
       speechRecognizer: null,
-      messageGenerator: null,
-      messageGenerator2: null, // Второй экземпляр для параллельной работы
       voiceIdentifier: null,
       dataCollector: null,
       brainCoordinator: null, // Мозг - личность, управляет органами
-      brainAssistant: null, // Помощник для сложных задач
-      chatReader: null, // Нейронка для чтения чата
-      rightHand: null, // Правая рука мозга для сложных задач
       brainTrainer: null, // Модуль обучения мозга
+      sessionHistory: null, // История сессии
     };
     this.coordinator = null;
     this.twitchClient = null;
     this.isRunning = false;
     this.messageGenerationInterval = null; // Интервал генерации сообщений
     this.audioCaptureInterval = null; // Интервал захвата аудио
-    this.chatReadingInterval = null; // Интервал чтения чата
   }
 
   async init() {
     console.log('🚀 Инициализация Twitch Neuro Chat Bot...\n');
 
     // Проверка конфигурации
-    if (!config.twitch.username || !config.twitch.oauthToken) {
-      throw new Error('Не указаны Twitch credentials в .env файле');
+    const missingTwitch = [];
+    if (!config.twitch.username) missingTwitch.push('TWITCH_USERNAME');
+    if (!config.twitch.oauthToken) missingTwitch.push('TWITCH_OAUTH_TOKEN');
+    if (missingTwitch.length > 0) {
+      throw new Error(`Не указаны Twitch credentials в .env файле: ${missingTwitch.join(', ')}\n` +
+        `Убедитесь, что файл .env существует и содержит эти переменные.`);
     }
 
-    if (!config.openai.apiKey) {
-      throw new Error('Не указан OpenAI API ключ в .env файле');
+    // Проверка API ключа (нужен либо OpenAI, либо ProxyAPI)
+    if (!config.openai.apiKey && !config.proxyapi.apiKey) {
+      throw new Error('Не указан API ключ в .env файле. Нужен либо OPENAI_API_KEY, либо PROXYAPI_KEY');
     }
 
     // Инициализация модулей
@@ -55,29 +52,23 @@ class TwitchNeuroBot {
     
     // Настройка использования локальных моделей и ProxyAPI
     const useLocalWhisper = config.local.useLocalWhisper;
-    const useLocalLLM = config.local.useLocalLLM;
-    const useLocalVision = config.local.useLocalVision;
     const useProxyAPI = config.proxyapi.enabled;
     
     console.log(`\n💡 Режим работы:`);
     const whisperMode = useLocalWhisper ? '🖥️  ЛОКАЛЬНЫЙ' : (useProxyAPI ? '🇷🇺 ProxyAPI' : '☁️  OpenAI API');
-    const llmMode = useLocalLLM ? '🖥️  ЛОКАЛЬНЫЙ' : (useProxyAPI ? '🇷🇺 ProxyAPI' : '☁️  OpenAI API');
-    const visionMode = useLocalVision ? '🖥️  ЛОКАЛЬНЫЙ' : (useProxyAPI ? '🇷🇺 ProxyAPI' : '☁️  OpenAI API');
+    const llmMode = useProxyAPI ? '🇷🇺 ProxyAPI (Gemini)' : '☁️  OpenAI API';
+    const visionMode = useProxyAPI ? '🇷🇺 ProxyAPI (Gemini)' : '☁️  OpenAI API';
     console.log(`   Whisper: ${whisperMode}`);
     console.log(`   LLM: ${llmMode}`);
     console.log(`   Vision: ${visionMode}\n`);
     
     this.modules.imageAnalyzer = new ImageAnalyzer({
       ...config.openai,
-      useLocal: useLocalVision,
       useProxyAPI: useProxyAPI,
       proxyAPIKey: config.proxyapi.apiKey,
       proxyAPIBaseUrl: config.proxyapi.baseUrl,
       proxyAPIProvider: config.proxyapi.provider,
       proxyAPIVisionModel: config.proxyapi.visionModel,
-      localOllamaUrl: config.local.ollamaUrl,
-      localOllamaVisionModel: config.local.ollamaVisionModel,
-      localLLMProvider: config.local.llmProvider,
     });
     
     this.modules.speechRecognizer = new SpeechRecognizer({
@@ -90,85 +81,38 @@ class TwitchNeuroBot {
       proxyAPIWhisperModel: config.proxyapi.whisperModel,
       localWhisperModel: config.local.whisperModel,
       localWhisperDevice: config.local.whisperDevice,
+      localWhisperComputeType: config.local.whisperComputeType,
+      localWhisperBeamSize: config.local.whisperBeamSize,
     });
-    
-    // Создаем несколько экземпляров генератора для параллельной работы
-    const messageGenConfig = {
-      ...config.openai,
-      useLocal: useLocalLLM,
-      useProxyAPI: useProxyAPI,
-      proxyAPIKey: config.proxyapi.apiKey,
-      proxyAPIBaseUrl: config.proxyapi.baseUrl,
-      proxyAPIProvider: config.proxyapi.provider,
-      proxyAPIChatModel: config.proxyapi.chatModel,
-      localOllamaUrl: config.local.ollamaUrl,
-      localOllamaModel: config.local.ollamaModel,
-      localLLMProvider: config.local.llmProvider,
-    };
-    
-    this.modules.messageGenerator = new MessageGenerator(messageGenConfig);
-    this.modules.messageGenerator2 = new MessageGenerator(messageGenConfig); // Второй экземпляр
     
     // Инициализация модулей мозга
     const brainMode = config.coordinator.brainMode || 'normal';
     this.modules.brainCoordinator = new BrainCoordinator({
-      useLocal: useLocalLLM,
-      localOllamaUrl: config.local.ollamaUrl,
-      localOllamaModel: config.local.ollamaModel,
       mode: brainMode, // Режим работы: 'normal' или 'training'
-    });
-    
-    this.modules.brainAssistant = new BrainAssistant({
-      useLocal: useLocalLLM,
-      localOllamaUrl: config.local.ollamaUrl,
-      localOllamaModel: config.local.ollamaModel,
-    });
-    
-    // Инициализация правой руки
-    this.modules.rightHand = new RightHand({
-      useLocal: useLocalLLM,
-      localOllamaUrl: config.local.ollamaUrl,
-      localOllamaModel: config.local.ollamaModel,
-    });
-    
-    // Инициализация нейронки для чтения чата
-    this.modules.chatReader = new ChatReader({
-      useLocal: useLocalLLM,
-      localOllamaUrl: config.local.ollamaUrl,
-      localOllamaModel: config.local.ollamaModel,
     });
     
     // Инициализация модуля обучения (только в режиме обучения)
     if (brainMode === 'training') {
-      this.modules.brainTrainer = new BrainTrainer({
-        useLocal: useLocalLLM,
-        localOllamaUrl: config.local.ollamaUrl,
-        localOllamaModel: config.local.ollamaModel,
-      });
+      this.modules.brainTrainer = new BrainTrainer({});
       await this.modules.brainTrainer.init();
+      
+      // Связываем brainTrainer с brainCoordinator для доступа к памяти
+      if (this.modules.brainTrainer && this.modules.brainCoordinator) {
+        this.modules.brainTrainer.brainCoordinator = this.modules.brainCoordinator;
+      }
     }
     
     // Инициализация локальных моделей
     await this.modules.imageAnalyzer.init();
     await this.modules.speechRecognizer.init();
-    await this.modules.messageGenerator.init();
-    await this.modules.messageGenerator2.init();
     await this.modules.brainCoordinator.init();
-    await this.modules.brainAssistant.init();
-    await this.modules.rightHand.init();
-    await this.modules.chatReader.init();
     
-    // Связываем правую руку с мозгом
-    this.modules.brainCoordinator.setRightHand(this.modules.rightHand);
-    
-    // Связываем brainCoordinator с модулями для оптимизации промптов
-    this.modules.imageAnalyzer.brainCoordinator = this.modules.brainCoordinator;
-    this.modules.chatReader.brainCoordinator = this.modules.brainCoordinator;
-    
-    // Связываем brainCoordinator с модулями для запроса скриншотов
-    this.modules.brainCoordinator.setBrowser(this.modules.browser);
-    this.modules.brainCoordinator.setImageAnalyzer(this.modules.imageAnalyzer);
-    this.modules.brainCoordinator.setCoordinator(this.coordinator);
+    // Инициализация браузера ПЕРЕД связыванием с brainCoordinator
+    this.modules.browser = new VirtualBrowser({
+      headless: config.browser.headless,
+      channel: config.twitch.channel,
+      screenshotInterval: config.browser.screenshotInterval,
+    });
     
     // Инициализация идентификатора голосов (мозг для распознавания голосов)
     this.modules.voiceIdentifier = new LocalVoiceIdentifier({
@@ -176,11 +120,15 @@ class TwitchNeuroBot {
     });
     await this.modules.voiceIdentifier.init();
     
-    this.modules.browser = new VirtualBrowser({
-      headless: config.browser.headless,
-      channel: config.twitch.channel,
-      screenshotInterval: config.browser.screenshotInterval,
-    });
+    // Связываем brainCoordinator с модулями для оптимизации промптов
+    this.modules.imageAnalyzer.brainCoordinator = this.modules.brainCoordinator;
+    
+    // Связываем brainCoordinator с модулями для запроса скриншотов (ПОСЛЕ создания browser)
+    this.modules.brainCoordinator.setBrowser(this.modules.browser);
+    this.modules.brainCoordinator.setImageAnalyzer(this.modules.imageAnalyzer);
+    this.modules.brainCoordinator.setCoordinator(this.coordinator);
+    // Связываем brainCoordinator с coordinator для доступа к текущему тексту речи
+    this.modules.brainCoordinator.setCoordinatorForSpeech(this.coordinator);
 
     // Инициализация сборщика данных для обучения
     this.modules.dataCollector = new DataCollector({
@@ -188,13 +136,17 @@ class TwitchNeuroBot {
     });
     await this.modules.dataCollector.init();
 
+    // Инициализация истории сессии (до координатора, чтобы он мог использовать)
+    this.modules.sessionHistory = new SessionHistory({});
+    await this.modules.sessionHistory.init();
+
     // Инициализация координатора
     this.coordinator = new Coordinator({
       ...config.coordinator,
       twitch: config.twitch, // Передаем конфигурацию Twitch для доступа к имени бота
     }, this.modules);
 
-    // Инициализация Twitch клиента (передаем dataCollector и brainTrainer для режима обучения)
+    // Инициализация Twitch клиента (передаем dataCollector и brainTrainer)
     this.twitchClient = new TwitchClient(
       this.coordinator, 
       this.modules.dataCollector,
@@ -230,7 +182,10 @@ class TwitchNeuroBot {
       // 2. Цикл генерации сообщений (использует уже обработанные данные)
 
       // ЦИКЛ 1: Обработка скриншотов (каждые 5 секунд)
-      console.log('📸 Запуск цикла обработки скриншотов (каждые 5 секунд)...');
+      // Ждем немного, чтобы браузер полностью инициализировался
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Цикл обработки скриншотов запущен
       await this.modules.browser.startScreenshotLoop(async (screenshot) => {
         if (!this.isRunning) return;
 
@@ -245,8 +200,8 @@ class TwitchNeuroBot {
         });
       });
 
-      // ЦИКЛ 2: Обработка голоса/аудио (каждые 5 секунд)
-      console.log('🎤 Запуск цикла обработки голоса (каждые 5 секунд)...');
+      // ЦИКЛ 2: Обработка голоса/аудио (каждые 3 секунды для ускорения)
+      // Цикл обработки голоса запущен
       this.audioCaptureInterval = await this.modules.browser.startAudioCaptureLoop(async (audioBuffer) => {
         if (!this.isRunning) return;
 
@@ -254,40 +209,15 @@ class TwitchNeuroBot {
         this.coordinator.processAudioOnly(audioBuffer).catch(error => {
           console.error('[Main] Ошибка обработки голоса:', error);
         });
-      }, 5000);
+      }, 3000);
 
-      // ЦИКЛ 3: Чтение чата через ChatReader (не нагружает мозг)
-      console.log('💬 Запуск цикла чтения чата (каждые 15 секунд)...');
-      this.chatReadingInterval = setInterval(async () => {
-        if (!this.isRunning) {
-          clearInterval(this.chatReadingInterval);
-          return;
-        }
+      // Ждем 15 секунд после подключения к стриму и захвата аудио, чтобы процессы успели запуститься
+      console.log('⏳ Ожидание 15 секунд для инициализации процессов...');
+      await new Promise(resolve => setTimeout(resolve, 15000));
+      console.log('✅ Процессы инициализированы, начинаем генерацию сообщений\n');
 
-        try {
-          // Читаем чат через ChatReader
-          if (this.modules.chatReader && this.coordinator) {
-            const chatHistory = this.coordinator.contextBuffer.chatHistory || [];
-            const context = {
-              imageAnalysis: this.coordinator.contextBuffer.recentImageAnalysis[this.coordinator.contextBuffer.recentImageAnalysis.length - 1],
-              speechText: this.coordinator.contextBuffer.recentSpeechText[this.coordinator.contextBuffer.recentSpeechText.length - 1],
-              chatHistory: chatHistory,
-              time: Date.now(),
-            };
-            
-            const interestingMessages = await this.modules.chatReader.findInterestingMessages(chatHistory, context);
-            
-            if (interestingMessages.length > 0) {
-              console.log(`[ChatReader] 🎯 Найдено интересных сообщений: ${interestingMessages.length}`);
-            }
-          }
-        } catch (error) {
-          console.error('[Main] Ошибка чтения чата:', error);
-        }
-      }, 15000); // Читаем чат каждые 15 секунд
-
-      // ЦИКЛ 4: Генерация сообщений (использует уже обработанные данные)
-      console.log('💬 Запуск цикла генерации сообщений (каждые 10 секунд)...');
+      // ЦИКЛ 3: Генерация сообщений (использует уже обработанные данные)
+      // Цикл генерации сообщений запущен
       this.messageGenerationInterval = setInterval(async () => {
         if (!this.isRunning) {
           clearInterval(this.messageGenerationInterval);
@@ -298,6 +228,10 @@ class TwitchNeuroBot {
           const message = await this.coordinator.generateMessageFromContext();
           if (message) {
             await this.twitchClient.sendMessage(message);
+            // Сохраняем сообщение в историю сессии
+            if (this.modules.sessionHistory) {
+              this.modules.sessionHistory.addBotMessage(message, Date.now()).catch(() => {});
+            }
             // Обновляем время последнего сообщения в мозге
             if (this.modules.brainCoordinator) {
               this.modules.brainCoordinator.setLastMessageTime(Date.now());
@@ -306,12 +240,12 @@ class TwitchNeuroBot {
         } catch (error) {
           console.error('[Main] Ошибка генерации сообщения:', error);
         }
-      }, 10000); // Проверяем каждые 10 секунд, можно ли сгенерировать сообщение
+      }, 5000); // Проверяем каждые 5 секунд, можно ли сгенерировать сообщение
 
       const currentMode = this.modules.brainCoordinator?.mode || 'normal';
       console.log('✅ Бот запущен и работает!\n');
       console.log(`🧠 Режим работы мозга: ${currentMode === 'training' ? 'ОБУЧЕНИЕ' : 'ОСНОВНОЙ'}\n`);
-      console.log('Команды для управления (в Twitch чате или в терминале):');
+      console.log('Команды для управления (только в терминале):');
       console.log('  !bot silence - включить режим молчания');
       console.log('  !bot unsilence - выключить режим молчания');
       console.log('  !bot stats - показать статистику');
@@ -416,8 +350,8 @@ class TwitchNeuroBot {
           }
           break;
         case 'memory':
-          if (this.modules.brainMemory) {
-            const memoryStats = this.modules.brainMemory.getStats();
+          if (this.modules.brainCoordinator && this.modules.brainCoordinator.memory) {
+            const memoryStats = this.modules.brainCoordinator.memory.getStats();
             console.log('\n💾 СТАТИСТИКА ПАМЯТИ:');
             console.log(`  Всего записей: ${memoryStats.totalEntries}`);
             console.log(`  Важных записей: ${memoryStats.importantEntries}`);
@@ -425,12 +359,16 @@ class TwitchNeuroBot {
             if (memoryStats.categories.length > 0) {
               console.log(`  Категории: ${memoryStats.categories.join(', ')}`);
             }
+          } else {
+            console.log('⚠️ Память не инициализирована');
           }
           break;
         case 'forget':
-          if (this.modules.brainMemory) {
-            this.modules.brainMemory.clear();
+          if (this.modules.brainCoordinator && this.modules.brainCoordinator.memory) {
+            this.modules.brainCoordinator.memory.clear();
             console.log('✅ Память очищена');
+          } else {
+            console.log('⚠️ Память не инициализирована');
           }
           break;
         case 'screenshot':
@@ -521,6 +459,12 @@ class TwitchNeuroBot {
     if (this.modules.dataCollector && this.modules.dataCollector.enabled) {
       console.log('[DataCollector] Сохранение сессии...');
       await this.modules.dataCollector.endSession();
+    }
+
+    // Сохраняем историю сессии перед остановкой
+    if (this.modules.sessionHistory) {
+      await this.modules.sessionHistory.save();
+      console.log('[SessionHistory] 💾 История сессии сохранена');
     }
 
     if (this.modules.browser) {

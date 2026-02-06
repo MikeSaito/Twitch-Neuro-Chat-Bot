@@ -1,43 +1,72 @@
-# Зависимости
+# Dependencies
 node_modules/
 package-lock.json
 
-# Переменные окружения
+# Environment variables
 .env
 .env.local
 .env.*.local
+# env.example - разрешен (пример конфигурации)
 
-# Временные файлы
-temp_audio/
-*.mp3
-*.wav
-*.part
-*.tmp
-
-# Скриншоты (опционально - можно включить в репозиторий)
-screenshots/
-*.png
-
-# Логи
+# Logs
 *.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Системные файлы
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+temp_audio/
+temp_audio.mp3
+
+# Screenshots
+screenshots/
+*.png
+*.jpg
+*.jpeg
+
+# Audio files
+*.wav
+*.mp3
+*.mp4
+*.m4a
+twitch_bot_audio/
+vad_chunk_*.wav
+chunk_*.wav
+
+# Data files (user-specific)
+data/chat_messages.json
+data/session_history.json
+data/voices.json
+data/streamer_info.json
+resources/brain_memory.json
+resources/prompts/
+
+# Training data
+data/training/
+training_data/
+training_data/**/*.json
+training_data/**/*.png
+training_data/**/*.jpg
+training_data/**/*.jpeg
+training_data/screenshots/
+training_data/metadata/
+session_*.json
+
+# OS files
 .DS_Store
 Thumbs.db
-*.swp
-*.swo
-*~
+desktop.ini
 
 # IDE
 .vscode/
 .idea/
-*.sublime-project
-*.sublime-workspace
-
-# Кэш и временные файлы Windows
-AppData/
-*.parc
+*.swp
+*.swo
+*~
 
 # Python
 __pycache__/
@@ -47,10 +76,9 @@ __pycache__/
 .Python
 venv/
 env/
+ENV/
 
-# Ресурсы (промпты и память могут содержать чувствительные данные)
-resources/prompts/
-resources/brain_memory.json
-
-# Данные
-data/voices.json
+# Build files
+dist/
+build/
+*.exe

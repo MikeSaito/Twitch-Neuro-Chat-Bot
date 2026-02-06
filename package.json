@@ -7,13 +7,19 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test:audio": "node test_audio_capture.js",
-    "test:speech": "node test_speech_recognition.js",
     "cleanup": "node cleanup_temp_files.js"
   },
-  "keywords": ["twitch", "bot", "ai", "neural-network"],
+  "keywords": ["twitch", "bot", "ai", "neural-network", "gemini", "whisper", "chat-bot"],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/twitch-neuro-chat-bot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yourusername/twitch-neuro-chat-bot/issues"
+  },
+  "homepage": "https://github.com/yourusername/twitch-neuro-chat-bot#readme",
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "tmi.js": "^1.8.5",
