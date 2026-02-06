@@ -13,6 +13,7 @@ export class Coordinator {
       totalMessages: 0,
       skippedMessages: 0,
       recentMessages: [], // История последних сообщений для проверки на повторения
+      duplicateCount: 0, // Счетчик повторяющихся сообщений для уведомления ИИ
       isFirstMessage: true, // Флаг первого сообщения при запуске
     };
     this.contextBuffer = {
@@ -411,10 +412,12 @@ export class Coordinator {
           // Обновляем время последнего запроса
           this.state.lastGeminiRequestTime = Date.now();
           
-          // Добавляем историю сессии в контекст
+          // Добавляем историю сессии и информацию о повторениях в контекст
           const contextWithHistory = {
             ...context,
             sessionHistory: this.sessionHistory,
+            duplicateCount: this.state.duplicateCount, // Передаем счетчик повторений для уведомления ИИ
+            recentMessages: this.state.recentMessages.slice(-3), // Последние 3 сообщения для контекста
           };
           const geminiResult = await this.modules.imageAnalyzer.generateChatMessageFromScreenshot(
             this.latestScreenshot.buffer,
@@ -471,9 +474,23 @@ export class Coordinator {
       });
 
       if (isDuplicate) {
+        this.state.duplicateCount++;
         console.log(`[Coordinator] ⚠️ Сообщение слишком похоже на предыдущие, отбрасываем: "${messageResult.message.substring(0, 50)}..."`);
+        console.log(`[Coordinator] 📊 Повторяющихся сообщений подряд: ${this.state.duplicateCount}`);
         this.state.skippedMessages++;
+        
+        // Если повторений слишком много - уведомляем ИИ в следующем промпте
+        if (this.state.duplicateCount >= 2) {
+          console.log(`[Coordinator] ⚠️ ИИ повторяется! Будет уведомлен в следующем промпте.`);
+        }
+        
         return null;
+      }
+      
+      // Если сообщение не повторяется - сбрасываем счетчик
+      if (this.state.duplicateCount > 0) {
+        console.log(`[Coordinator] ✅ ИИ перестал повторяться (было ${this.state.duplicateCount} повторений)`);
+        this.state.duplicateCount = 0;
       }
 
       // Сохраняем сообщение в историю (храним последние 5 сообщений)
